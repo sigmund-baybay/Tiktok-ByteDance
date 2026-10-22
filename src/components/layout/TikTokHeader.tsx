@@ -47,29 +47,29 @@ export const TikTokHeader: React.FC<TikTokHeaderProps> = ({
             </div>
           </div>
 
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="flex items-center gap-1.5">
-                <span className="text-lg sm:text-xl font-extrabold tracking-tight text-white font-sans">
-                  TikTok <span className="text-[#FE2C55]">Shop</span>
-                </span>
-                <span className="text-xs px-1.5 py-0.5 rounded font-black bg-[#25F4EE]/10 text-[#25F4EE] border border-[#25F4EE]/30">
-                  PH
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-lg sm:text-xl font-extrabold tracking-tight text-white font-sans">
+                    TikTok <span className="text-[#FE2C55]">Shop</span>
+                  </span>
+                  <span className="text-xs px-1.5 py-0.5 rounded font-black bg-[#25F4EE]/10 text-[#25F4EE] border border-[#25F4EE]/30">
+                    PH
+                  </span>
+                </div>
+                <span className="text-white/20 hidden sm:inline">•</span>
+                <h1 className="text-xs sm:text-sm font-semibold tracking-wide text-slate-200">
+                  Cash on Delivery (COD) Dilemma
+                </h1>
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#25F4EE]/10 text-[#25F4EE] border border-[#25F4EE]/25">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#25F4EE] animate-pulse" />
+                  Dual-Layer Engine
                 </span>
               </div>
-              <span className="text-white/20 hidden sm:inline">•</span>
-              <h1 className="text-xs sm:text-sm font-semibold tracking-wide text-slate-200">
-                Dynamic COD Risk Scoring Model
-              </h1>
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#25F4EE]/10 text-[#25F4EE] border border-[#25F4EE]/25">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#25F4EE] animate-pulse" />
-                LIVE Risk Engine
-              </span>
+              <p className="text-[11px] text-slate-300 mt-0.5">
+                Balancing explosive GMV growth with reverse logistics through pre-checkout predictive risk gating & post-checkout delivery deflection
+              </p>
             </div>
-            <p className="text-[11px] text-slate-400 mt-0.5">
-              Proactive real-time checkout friction interception replacing blunt platform account bans
-            </p>
-          </div>
         </div>
 
         {/* Executive Context Badges & Model Spec Trigger */}

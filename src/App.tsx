@@ -605,14 +605,14 @@ export default function App(): React.JSX.Element {
             <div>
               <div className="flex items-center gap-2">
                 <span className="text-lg font-black text-white tracking-tight">
-                  TikTok <span className="text-[#FE2C55]">Shop</span> PH
+                  TikTok <span className="text-[#FE2C55]">Shop</span> Philippines
                 </span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded font-black bg-[#25F4EE]/10 text-[#25F4EE] border border-[#25F4EE]/30">
-                  COMMAND CENTER
+                <span className="text-[10px] px-2 py-0.5 rounded font-black bg-[#25F4EE]/10 text-[#25F4EE] border border-[#25F4EE]/30">
+                  COD DILEMMA
                 </span>
               </div>
-              <p className="text-[11px] text-slate-400">
-                End-to-End COD Risk Optimization: Pre-Checkout Scoring to Post-Checkout Logistics Intervention
+              <p className="text-[11px] text-slate-300 font-medium">
+                Cash on Delivery (COD) Dilemma: Balancing explosive GMV growth with reverse logistics through pre-checkout predictive risk gating & post-checkout delivery deflection
               </p>
             </div>
           </div>
@@ -1714,13 +1714,13 @@ export default function App(): React.JSX.Element {
       {/* Enterprise Executive Footer */}
       <footer className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-12 pt-4 border-t border-white/10 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400">
         <div className="flex items-center gap-2">
-          <span className="font-bold text-white">TikTok Shop Philippines</span>
+          <span className="font-bold text-white">TikTok Shop Philippines' Cash on Delivery (COD) Dilemma</span>
           <span className="text-white/20">•</span>
-          <span>COD Optimization Command Center</span>
+          <span>Balancing Growth & Logistics: Pre-Checkout ML Engine & Post-Checkout Mitigation</span>
         </div>
         <div className="flex items-center gap-4 text-[11px] font-mono">
-          <span>Tab 1: Pre-Checkout ML Engine (60K PH Dataset)</span>
-          <span>Tab 2: Reactive Post-Checkout Logistics Deflection</span>
+          <span>Aspect 1: Pre-Checkout Predictive Gating</span>
+          <span>Aspect 2: Reactive Post-Checkout Logistics Deflection</span>
         </div>
       </footer>
 
