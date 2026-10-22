@@ -1,14 +1,14 @@
-# TikTok Shop Philippines — Dynamic COD Risk Scoring Simulator
+# TikTok Shop Philippines' Cash on Delivery (COD) Dilemma
 
+[![Team: Joes and the Mars](https://img.shields.io/badge/Team-Joes%20and%20the%20Mars-FE2C55?logo=tiktok&logoColor=white)](https://github.com/sigmund-baybay/Tiktok-ByteDance)
 [![Netlify Deploy](https://img.shields.io/badge/Deploy-Netlify-00C7B7?logo=netlify&logoColor=white)](https://www.netlify.com/)
 [![React](https://img.shields.io/badge/React-19.x-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x--Strict-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind-3.4-38B2AC?logo=tailwind-css&logoColor=white)](https://tailwindcss.com/)
 [![Vite](https://img.shields.io/badge/Vite-6.x-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
 
-An enterprise-grade, proactive **Cash-on-Delivery (COD) Risk Scoring & Real-Time Checkout Friction Engine** designed for **TikTok Shop Philippines**. 
-
-Trained and calibrated on a 60,000+ Philippine transaction dataset, this model shifts platform risk mitigation from blunt, reactive account suspensions to proactive, dynamic choice-architecture interventions directly in the mobile checkout funnel.
+**COD Optimization Command Center • Engineered by Joes and the Mars**  
+*Dual-Layer Architecture: Pre-Checkout Predictive ML Risk Gating & Post-Checkout Reactive Logistics Deflection*
 
 ---
 
@@ -193,5 +193,11 @@ This project is configured for **zero-friction Netlify CI/CD** deployment via `n
 
 ---
 
+## 👥 Engineering & Design Team
+**Joes and the Mars**  
+*TikTok Shop Philippines E-Commerce Operations, Applied ML, and Frontend Architecture*
+
+---
+
 ## 📄 License
-Internal Prototype for TikTok / ByteDance E-Commerce Engineering & Data Science teams.
+Internal Prototype for TikTok / ByteDance E-Commerce Engineering & Data Science teams. Presented by **Joes and the Mars**.

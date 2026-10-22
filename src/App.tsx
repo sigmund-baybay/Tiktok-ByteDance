@@ -603,12 +603,16 @@ export default function App(): React.JSX.Element {
             </div>
 
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="text-lg font-black text-white tracking-tight">
                   TikTok <span className="text-[#FE2C55]">Shop</span> Philippines
                 </span>
                 <span className="text-[10px] px-2 py-0.5 rounded font-black bg-[#25F4EE]/10 text-[#25F4EE] border border-[#25F4EE]/30">
                   COD DILEMMA
+                </span>
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-gradient-to-r from-[#FE2C55]/20 via-purple-500/20 to-[#25F4EE]/20 text-white border border-white/25 shadow-xs">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#FE2C55] animate-pulse" />
+                  Team: Joes and the Mars
                 </span>
               </div>
               <p className="text-[11px] text-slate-300 font-medium">
@@ -1713,14 +1717,14 @@ export default function App(): React.JSX.Element {
 
       {/* Enterprise Executive Footer */}
       <footer className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-12 pt-4 border-t border-white/10 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-2">
           <span className="font-bold text-white">TikTok Shop Philippines' Cash on Delivery (COD) Dilemma</span>
-          <span className="text-white/20">•</span>
-          <span>Balancing Growth & Logistics: Pre-Checkout ML Engine & Post-Checkout Mitigation</span>
+          <span className="text-white/20 hidden sm:inline">•</span>
+          <span className="text-slate-300">Engineered by <strong className="text-white font-extrabold text-[#25F4EE]">Joes and the Mars</strong></span>
         </div>
-        <div className="flex items-center gap-4 text-[11px] font-mono">
-          <span>Aspect 1: Pre-Checkout Predictive Gating</span>
-          <span>Aspect 2: Reactive Post-Checkout Logistics Deflection</span>
+        <div className="flex items-center gap-3 text-[11px] font-mono">
+          <span>Dual-Layer Risk Architecture</span>
+          <span className="text-[#FE2C55] font-extrabold bg-[#FE2C55]/10 px-2 py-0.5 rounded border border-[#FE2C55]/30">Team: Joes and the Mars</span>
         </div>
       </footer>
 
