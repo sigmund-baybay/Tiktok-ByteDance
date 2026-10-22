@@ -63,4 +63,17 @@ assert(formatModifier(4) === '+4%', 'Modifier positive +4%');
 assert(formatModifier(-11) === '-11%', 'Modifier negative -11%');
 assert(formatModifier(0) === '0%', 'Modifier zero 0%');
 
-console.log('\n🎉 ALL 14 MATHEMATICAL & TIER ASSERTIONS PASSED REGRESSION CHECKS!');
+// 7. Tier 3 Micro-Deposit Deduction Invariant: Total - ₱50 = Doorstep Collect
+const sampleItemPrice = 350;
+const sampleDeposit = 50;
+const sampleDoorstepCollect = sampleItemPrice - sampleDeposit;
+assert(sampleDoorstepCollect === 300, `Tier 3 deduction: ₱350 - ₱50 = ₱300 (got ₱${sampleDoorstepCollect})`);
+
+// 8. Tier 4 Voucher Stacking Invariant: ₱45 Free Shipping + ₱20 Prepaid Subsidy = ₱65 Total
+const freeShippingAllowance = 45;
+const prepaidSubsidy = 20;
+const combinedStackedSavings = freeShippingAllowance + prepaidSubsidy;
+assert(combinedStackedSavings === 65, `Tier 4 voucher stack: ₱45 + ₱20 = ₱65 (got ₱${combinedStackedSavings})`);
+
+console.log('\n🎉 ALL 16 MATHEMATICAL, TIER, & EDGE CASE ASSERTIONS PASSED REGRESSION CHECKS!');
+

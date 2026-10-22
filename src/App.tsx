@@ -141,7 +141,11 @@ export default function App(): React.JSX.Element {
                 {/* Side Breakdown & Impact Cards */}
                 <div className="xl:col-span-5 space-y-4">
                   <FeatureWaterfall calculation={calculation} />
-                  <BusinessImpact tierId={calculation.tier.id} />
+                  <BusinessImpact
+                    tierId={calculation.tier.id}
+                    orderTotal={totalOrderAmount}
+                    finalScore={calculation.finalScore}
+                  />
                 </div>
 
               </div>

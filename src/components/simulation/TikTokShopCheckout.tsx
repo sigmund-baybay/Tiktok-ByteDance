@@ -128,18 +128,69 @@ export const TikTokShopCheckout: React.FC<TikTokShopCheckoutProps> = ({
             </div>
           </div>
 
-          {/* Free Shipping Voucher Banner */}
-          <div className="mx-3 mt-2.5 p-2 rounded-xl bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 flex items-center justify-between text-xs shadow-2xs">
-            <div className="flex items-center gap-2 text-emerald-800">
-              <Ticket className="w-4 h-4 text-emerald-600" />
-              <div>
-                <span className="font-bold text-[11px]">TikTok Shop Free Shipping Voucher Applied</span>
-                <div className="text-[9px] text-emerald-700 font-medium">Capped at ₱50 discount on delivery</div>
+          {/* Voucher Section: Single Voucher (Tiers 1-3) vs. Stacked Vouchers (Tier 4 Edge Case) */}
+          <div className="mx-3 mt-2.5 space-y-1.5">
+            {tier.id === 4 ? (
+              /* TIER 4: VOUCHER STACKING (Free Shipping -₱45 + GCash/Maya Prepaid Subsidy -₱20 = -₱65 Total) */
+              <div className="p-2.5 rounded-xl bg-gradient-to-br from-emerald-50 via-teal-50 to-rose-50 border border-emerald-300 shadow-2xs space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-800 flex items-center gap-1">
+                    <Ticket className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>2 Vouchers Stacked & Applied</span>
+                  </span>
+                  <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-emerald-700 text-white shadow-2xs">
+                    No Subsidy Cannibalization
+                  </span>
+                </div>
+
+                {/* Voucher 1: Standard Free Shipping */}
+                <div className="flex items-center justify-between bg-white/90 p-1.5 rounded-lg border border-emerald-200 text-xs">
+                  <div className="flex items-center gap-2 text-emerald-900">
+                    <span className="text-[10px] font-extrabold px-1 rounded bg-emerald-100 text-emerald-800">1</span>
+                    <div>
+                      <div className="font-bold text-[11px]">Free Shipping Voucher</div>
+                      <div className="text-[9px] text-slate-500">Capped at ₱45 delivery allowance</div>
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-black text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded">
+                    -₱45.00
+                  </span>
+                </div>
+
+                {/* Voucher 2: Tier 4 Digital E-Wallet Conversion Incentive */}
+                <div className="flex items-center justify-between bg-white/90 p-1.5 rounded-lg border border-rose-200 text-xs">
+                  <div className="flex items-center gap-2 text-rose-950">
+                    <span className="text-[10px] font-extrabold px-1 rounded bg-rose-100 text-[#FE2C55]">2</span>
+                    <div>
+                      <div className="font-bold text-[11px] text-[#FE2C55]">Prepaid Conversion Subsidy</div>
+                      <div className="text-[9px] text-slate-500">Tier 4 GCash/Maya Incentive • Stacked</div>
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-black text-[#FE2C55] bg-rose-100 px-1.5 py-0.5 rounded">
+                    -₱20.00
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between pt-0.5 px-1 text-[10px] text-slate-700 font-extrabold border-t border-emerald-200/60">
+                  <span className="text-emerald-900">Combined Non-Cannibalized Savings:</span>
+                  <span className="text-emerald-800 font-mono font-black">-₱65.00 Total Off</span>
+                </div>
               </div>
-            </div>
-            <span className="text-[10px] font-extrabold text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded">
-              -₱{shipping === 0 ? '45' : '0'}
-            </span>
+            ) : (
+              /* Standard Single Free Shipping Voucher for Tiers 1-3 */
+              <div className="p-2 rounded-xl bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 flex items-center justify-between text-xs shadow-2xs">
+                <div className="flex items-center gap-2 text-emerald-800">
+                  <Ticket className="w-4 h-4 text-emerald-600" />
+                  <div>
+                    <span className="font-bold text-[11px]">TikTok Shop Free Shipping Voucher Applied</span>
+                    <div className="text-[9px] text-emerald-700 font-medium">Capped at ₱50 discount on delivery</div>
+                  </div>
+                </div>
+                <span className="text-[10px] font-extrabold text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded">
+                  -₱{shipping === 0 ? '45' : '0'}
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Product Order Summary Card */}
@@ -451,7 +502,7 @@ export const TikTokShopCheckout: React.FC<TikTokShopCheckoutProps> = ({
 
         {/* Sticky Bottom Checkout Bill & Place Order CTA Button */}
         <div className="bg-white border-t border-slate-200/90 p-3.5 space-y-2.5 sticky bottom-0 z-20 shadow-md">
-          <div className="space-y-1 text-[11px] text-slate-600">
+          <div className="space-y-1.5 text-[11px] text-slate-600">
             <div className="flex justify-between">
               <span>Merchandise Subtotal</span>
               <span className="font-mono">{formatPHP(subtotal)}</span>
@@ -462,26 +513,69 @@ export const TikTokShopCheckout: React.FC<TikTokShopCheckoutProps> = ({
               <span className="font-mono">{shipping === 0 ? 'FREE' : formatPHP(shipping)}</span>
             </div>
 
-            {tier.id === 3 && (
-              <div className="flex justify-between text-orange-700 font-bold text-[10px]">
-                <span>Securing Deposit (Now): ₱50</span>
-                <span>Due on Delivery: {formatPHP(tier3CollectOnDelivery)}</span>
+            {/* TIER 3 EDGE CASE: EXPLICIT MICRO-DEPOSIT DEDUCTION */}
+            {tier.id === 3 ? (
+              <div className="space-y-1 pt-1 border-t border-slate-100">
+                <div className="flex justify-between text-slate-700 font-bold">
+                  <span>Gross Order Value:</span>
+                  <span className="font-mono">{formatPHP(totalOrderAmount)}</span>
+                </div>
+
+                <div className="flex justify-between text-orange-700 font-bold">
+                  <span className="flex items-center gap-1">
+                    <span>Deposit {depositPaid ? 'Paid' : 'Required'} (GCash/Maya):</span>
+                  </span>
+                  <span className="font-mono">-₱50.00</span>
+                </div>
+
+                {/* Explicit Formula Banner per Stakeholder Requirements */}
+                <div className="my-1 py-1 px-2 rounded-lg bg-orange-50 border border-orange-200 text-orange-950 text-[10px] font-mono font-bold text-center tracking-tight">
+                  Total: {formatPHP(totalOrderAmount)} | Deposit Paid: -₱50 | Amount to Collect at Door: {formatPHP(tier3CollectOnDelivery)}
+                </div>
+
+                <div className="flex justify-between text-xs font-black text-slate-900 pt-1 border-t border-dashed border-slate-300">
+                  <span className="text-emerald-900 flex items-center gap-1">
+                    <Truck className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Amount to Collect at Door</span>
+                  </span>
+                  <span className="font-mono text-sm text-[#FE2C55]">
+                    {formatPHP(tier3CollectOnDelivery)}
+                  </span>
+                </div>
+              </div>
+            ) : tier.id === 4 ? (
+              /* TIER 4 EDGE CASE: VOUCHER STACKING BREAKDOWN */
+              <div className="space-y-1 pt-1 border-t border-slate-100">
+                <div className="flex justify-between text-[#FE2C55] font-bold text-[10px]">
+                  <span>Voucher 1: Free Shipping Allowance</span>
+                  <span className="font-mono">-₱45.00</span>
+                </div>
+
+                <div className="flex justify-between text-[#FE2C55] font-black text-[10px]">
+                  <span>Voucher 2: Prepaid GCash/Maya Subsidy</span>
+                  <span className="font-mono">-₱20.00</span>
+                </div>
+
+                <div className="my-1 py-1 px-2 rounded-lg bg-rose-50 border border-rose-200 text-rose-950 text-[10px] font-mono font-bold text-center tracking-tight">
+                  Stacked Savings: Free Shipping (-₱45) + Prepaid (-₱20) = -₱65 Total
+                </div>
+
+                <div className="flex justify-between text-xs font-black text-slate-900 pt-1 border-t border-slate-100">
+                  <span>Net Total Payment (Prepaid)</span>
+                  <span className="font-mono text-sm text-[#FE2C55]">
+                    {formatPHP(totalOrderAmount)}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              /* TIER 1 & 2 STANDARD BILLING */
+              <div className="flex justify-between text-xs font-black text-slate-900 pt-1 border-t border-slate-100">
+                <span>Total Payment</span>
+                <span className="font-mono text-sm text-[#FE2C55]">
+                  {formatPHP(totalOrderAmount)}
+                </span>
               </div>
             )}
-
-            {tier.id === 4 && (
-              <div className="flex justify-between text-[#FE2C55] font-black text-[10px]">
-                <span>Prepaid GCash/Maya Incentive</span>
-                <span>-₱20.00</span>
-              </div>
-            )}
-
-            <div className="flex justify-between text-xs font-black text-slate-900 pt-1 border-t border-slate-100">
-              <span>Total Payment</span>
-              <span className="font-mono text-sm text-[#FE2C55]">
-                {formatPHP(totalOrderAmount)}
-              </span>
-            </div>
           </div>
 
           {!orderSubmitted ? (
