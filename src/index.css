@@ -1,0 +1,56 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: #010101;
+    color: #f1f5f9;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    overflow-x: hidden;
+  }
+}
+
+/* Custom TikTok Brand Shadows & Glitch Effects */
+.tiktok-glitch-text {
+  text-shadow: -1.5px -1.5px 0px #25F4EE, 1.5px 1.5px 0px #FE2C55;
+}
+
+.tiktok-glitch-box {
+  box-shadow: -2px -2px 0px rgba(37, 244, 238, 0.4), 2px 2px 0px rgba(254, 44, 85, 0.4);
+}
+
+.tiktok-glitch-badge {
+  box-shadow: -1.5px -1.5px 0px #25F4EE, 1.5px 1.5px 0px #FE2C55;
+}
+
+.tiktok-cyan-glow {
+  box-shadow: 0 0 15px rgba(37, 244, 238, 0.25);
+}
+
+.tiktok-pink-glow {
+  box-shadow: 0 0 15px rgba(254, 44, 85, 0.25);
+}
+
+/* Custom Scrollbar for Sleek Dark Dashboards */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0a0a0c;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #27272a;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3f3f46;
+}
