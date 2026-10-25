@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Sliders,
   TrendingDown,
@@ -371,7 +371,13 @@ const TIER_POLICY_ROWS: Array<{ label: string; values: Record<1 | 2 | 3 | 4, str
   { label: 'Post-checkout', values: { 1: 'Delivery-day reminder', 2: '+ 24hr cooling-off', 3: '+ courier AI outreach', 4: 'All three, earliest' } },
 ];
 
-type OrderStage = 'Pending Warehouse Packing' | 'Dispatched & In Transit' | 'Out for Delivery';
+type OrderStage =
+  | 'Awaiting Checkout'
+  | 'Pending Warehouse Packing'
+  | 'Dispatched & In Transit'
+  | 'Out for Delivery'
+  | 'Delivered'
+  | 'At Pickup Point';
 
 interface PendingOrder {
   id: string;
@@ -389,6 +395,8 @@ interface PendingOrder {
   paymentMode: 'cod' | 'prepaid';
   activeMitigation: 'none' | 'reminder_sent' | 'window_locked' | 'ai_dispatched';
   windowSelected?: string;
+  codDue?: number; // cash due at the door when it differs from itemPrice (deposit, vouchers)
+  attemptCount?: number;
 }
 
 // Seeded Tab 2 dashboard counters (restored by the Tab 2 Reset button).
@@ -402,7 +410,7 @@ const ACTION_STAGE: Record<'push_reminder' | 'inbox_window' | 'courier_chat', Or
 };
 
 const collectAtDoor = (order: PendingOrder) =>
-  order.paymentMode === 'prepaid' ? 0 : order.itemPrice;
+  order.paymentMode === 'prepaid' ? 0 : order.codDue ?? order.itemPrice;
 
 const courierOpeningMessage = (order: PendingOrder) => ({
   sender: 'bot' as const,
@@ -479,13 +487,187 @@ const INITIAL_PENDING_ORDERS: PendingOrder[] = [
   },
 ];
 
+/* --------------------------------------------------------------------------
+   SHARED ORDER: the one transaction configured in Tab 1 and viewed by Tab 2
+   (platform ops), Tab 3 (seller) and Tab 4 (rider). Not separate simulators.
+   -------------------------------------------------------------------------- */
+const SHARED_ORDER_ID = 'shared';
+const SHARED_ORDER_NUMBER = 'Order #1001';
+const SHARED_BUYER_NAME = 'Juan Dela Cruz';
+const TAB1_DELIVERY_WINDOW = 'Sat 9 AM – 12 PM';
+
+type FulfillmentStatus =
+  | 'awaiting_confirmation'
+  | 'confirmed'
+  | 'packed'
+  | 'in_transit'
+  | 'out_for_delivery'
+  | 'delivered'
+  | 'at_pickup_point'
+  | 'cancelled';
+
+// Mutable part of the shared order. Score, tier, product, totals and courier
+// are derived from the Tab 1 configuration (see SharedOrder).
+interface SharedOrderState {
+  paymentMethod: 'cod' | 'prepaid';
+  paidVia: 'checkout' | 'post_checkout' | 'qr_at_door' | null;
+  depositPaid: boolean;
+  otpVerified: boolean;
+  intentConfirmed: boolean;
+  windowSelected: string | null;
+  pickupSelected: boolean;
+  status: FulfillmentStatus;
+  cancelledFrom: FulfillmentStatus | null;
+  attemptCount: number;
+  // Listing adjustment the order was scored with, locked at checkout so a later listing
+  // change never re-scores (and re-prices) an order that was already placed.
+  scoredListingAdjustment: number | null;
+}
+
+interface SharedOrder extends SharedOrderState {
+  id: string;
+  riskScore: number;
+  tier: 1 | 2 | 3 | 4;
+  product: { title: string; price: number; shipping: number; category: string };
+  totalOrderAmount: number;
+  collectAtDoor: number;
+  assignedCourier: string;
+}
+
+const newSharedOrderState = (paymentMethod: 'cod' | 'prepaid'): SharedOrderState => ({
+  paymentMethod,
+  paidVia: paymentMethod === 'prepaid' ? 'checkout' : null,
+  depositPaid: false,
+  otpVerified: false,
+  intentConfirmed: false,
+  windowSelected: null,
+  pickupSelected: false,
+  status: 'awaiting_confirmation',
+  cancelledFrom: null,
+  attemptCount: 0,
+  scoredListingAdjustment: null,
+});
+
+// Re-routing to a pickup point is offered only from the SECOND failed attempt.
+// Case data: re-attempt rate correlates inversely with failure (A&B 1.8 attempts / 29%,
+// XYZ 1.7 / 26%, Quick Van 1.3 / 33%, Others 1.2 / 36%), so diverting after a single
+// attempt would forfeit a lever that works.
+const REROUTE_MIN_ATTEMPTS = 2;
+const PICKUP_TRANSFER_COST = 20; // unsourced assumption, labelled in the UI
+
+/* --------------------------------------------------------------------------
+   LISTING QUALITY GATE (Tab 3). A published, complete listing lowers that
+   category's contribution to the Tab 1 score. The size of the reduction is an
+   unsourced planning assumption, labelled in the UI.
+   -------------------------------------------------------------------------- */
+const LISTING_MAX_REDUCTION = 3;
+const LISTING_SIZES = ['S', 'M', 'L', 'XL'] as const;
+type ListingSize = (typeof LISTING_SIZES)[number];
+type GatedCategory = 'fashion_apparel' | 'elec_refurb';
+const REFURB_GRADES: Array<{ id: 'A' | 'B' | 'C'; criteria: string }> = [
+  { id: 'A', criteria: 'Like new: no visible marks, all accessories, 90%+ battery/lamp life' },
+  { id: 'B', criteria: 'Light wear: minor cosmetic marks, fully functional, 80%+ battery/lamp life' },
+  { id: 'C', criteria: 'Visible wear: noticeable marks or missing accessories, fully functional' },
+];
+const LISTING_CASE: Record<GatedCategory, { label: string; share: string; failure: string; driver: string }> = {
+  fashion_apparel: {
+    label: 'Fashion Apparel',
+    share: '28%',
+    failure: '33%',
+    driver: 'Size and fit uncertainty: buyers cannot try before purchase; sizing varies across brands.',
+  },
+  elec_refurb: {
+    label: 'Electronics (Refurb)',
+    share: '7%',
+    failure: '29%',
+    driver: 'Quality and authenticity concerns: buyers worry about actual condition vs. listing description.',
+  },
+};
+
+interface ListingState {
+  apparelSizes: Record<ListingSize, { chest: string; length: string }>;
+  apparelPublished: boolean;
+  refurbPhoto: boolean;
+  refurbGrade: 'A' | 'B' | 'C' | null;
+  refurbPublished: boolean;
+}
+
+const INITIAL_LISTING: ListingState = {
+  apparelSizes: { S: { chest: '', length: '' }, M: { chest: '', length: '' }, L: { chest: '', length: '' }, XL: { chest: '', length: '' } },
+  apparelPublished: false,
+  refurbPhoto: false,
+  refurbGrade: null,
+  refurbPublished: false,
+};
+
+const apparelCompleteness = (l: ListingState) =>
+  LISTING_SIZES.reduce((n, s) => n + (Number(l.apparelSizes[s].chest) > 0 ? 1 : 0) + (Number(l.apparelSizes[s].length) > 0 ? 1 : 0), 0) /
+  (LISTING_SIZES.length * 2);
+const refurbCompleteness = (l: ListingState) => ((l.refurbPhoto ? 1 : 0) + (l.refurbGrade ? 1 : 0)) / 2;
+
+// Listing adjustment applied to the Tab 1 score: only for a published, complete listing.
+const listingAdjustmentFor = (category: string, l: ListingState) =>
+  (category === 'fashion_apparel' && l.apparelPublished && apparelCompleteness(l) === 1) ||
+  (category === 'elec_refurb' && l.refurbPublished && refurbCompleteness(l) === 1)
+    ? -LISTING_MAX_REDUCTION
+    : 0;
+
+const computeRisk = (selections: Record<string, string>, listingAdjustment: number) => {
+  const breakdown = Object.entries(DIMENSIONS).map(([key, dim]) => {
+    const selectedOption = dim.options.find((opt) => opt.id === selections[key]) ?? dim.options[0];
+    return {
+      key,
+      dimensionLabel: dim.label.replace(/^\d+\.\s*/, ''),
+      optionLabel: selectedOption.label,
+      modifier: selectedOption.modifier,
+      actualRate: selectedOption.actualRate,
+    };
+  });
+
+  const sumModifiers = breakdown.reduce((acc, item) => acc + item.modifier, 0);
+  const rawScore = BASE_FAILURE_RATE + sumModifiers + listingAdjustment;
+  const finalScore = Math.max(0, Math.min(100, rawScore));
+
+  let tierId: 1 | 2 | 3 | 4 = 1;
+  if (finalScore >= 56) tierId = 4;
+  else if (finalScore >= 46) tierId = 3;
+  else if (finalScore >= 35) tierId = 2;
+  else tierId = 1;
+
+  return {
+    breakdown,
+    sumModifiers,
+    listingAdjustment,
+    rawScore,
+    finalScore,
+    tier: TIER_CONFIGS[tierId],
+  };
+};
+
+type TabKey = 'tab1_pre' | 'tab2_post' | 'tab3_seller' | 'tab4_courier';
+
+// Shared order status → the stage vocabulary Tab 2 dispatches against and Tab 3 displays.
+const STATUS_STAGE: Record<FulfillmentStatus, OrderStage> = {
+  awaiting_confirmation: 'Awaiting Checkout',
+  confirmed: 'Pending Warehouse Packing',
+  packed: 'Pending Warehouse Packing',
+  in_transit: 'Dispatched & In Transit',
+  out_for_delivery: 'Out for Delivery',
+  delivered: 'Delivered',
+  at_pickup_point: 'At Pickup Point',
+  cancelled: 'Pending Warehouse Packing',
+};
+
+const PRE_DISPATCH_STAGES: OrderStage[] = ['Awaiting Checkout', 'Pending Warehouse Packing'];
+const RIDER_RUN_STAGES: OrderStage[] = ['Dispatched & In Transit', 'Out for Delivery', 'Delivered'];
+
 /* ==========================================================================
    MAIN COMPONENT: COD OPTIMIZATION COMMAND CENTER
    ========================================================================== */
 
 export default function App(): React.JSX.Element {
-  // Navigation: Tab 1 vs Tab 2
-  const [activeTab, setActiveTab] = useState<'tab1_pre' | 'tab2_post'>('tab1_pre');
+  // Navigation
+  const [activeTab, setActiveTab] = useState<TabKey>('tab1_pre');
   const [showFormulaModal, setShowFormulaModal] = useState<boolean>(false);
 
   /* --------------------------------------------------------------------------
@@ -500,78 +682,61 @@ export default function App(): React.JSX.Element {
   const [appealSubmitted, setAppealSubmitted] = useState<boolean>(false);
   const [otpInput, setOtpInput] = useState<string>(DEMO_OTP);
   const [otpError, setOtpError] = useState<boolean>(false);
-  const [otpVerified, setOtpVerified] = useState<boolean>(false);
-  const [intentConfirmed, setIntentConfirmed] = useState<boolean>(false);
-  const [depositPaid, setDepositPaid] = useState<boolean>(false);
-  const [windowSelected, setWindowSelected] = useState<boolean>(false);
-  const [pickupSelected, setPickupSelected] = useState<boolean>(false);
-  const [paymentChoice, setPaymentChoice] = useState<'cod' | 'prepaid'>('cod');
   const [selectedPrepaidWallet, setSelectedPrepaidWallet] = useState<'gcash' | 'maya'>('gcash');
-  const [orderSubmitted, setOrderSubmitted] = useState<boolean>(false);
   const [abMode, setAbMode] = useState<'with_ml' | 'without_ml'>('with_ml');
   const [scenario, setScenario] = useState<ScenarioKey>('base');
   const [verifyDeflectionRate, setVerifyDeflectionRate] = useState<number>(SCENARIOS.base.verifyDeflection);
 
-  const calculation = useMemo(() => {
-    const breakdown = Object.entries(DIMENSIONS).map(([key, dim]) => {
-      const selectedOption = dim.options.find((opt) => opt.id === selections[key]) ?? dim.options[0];
-      return {
-        key,
-        dimensionLabel: dim.label.replace(/^\d+\.\s*/, ''),
-        optionLabel: selectedOption.label,
-        modifier: selectedOption.modifier,
-        actualRate: selectedOption.actualRate,
-      };
-    });
+  // THE shared order. Tab 1 configures it; Tabs 2, 3 and 4 read and write this same object.
+  const [orderState, setOrderState] = useState<SharedOrderState>(() => newSharedOrderState('cod'));
+  const patchOrder = (patch: Partial<SharedOrderState>) => setOrderState((prev) => ({ ...prev, ...patch }));
 
-    const sumModifiers = breakdown.reduce((acc, item) => acc + item.modifier, 0);
-    const rawScore = BASE_FAILURE_RATE + sumModifiers;
-    const finalScore = Math.max(0, Math.min(100, rawScore));
+  // Tab 3 listing quality gate (feeds the Tab 1 score once published)
+  const [listing, setListing] = useState<ListingState>(INITIAL_LISTING);
+  const [listingCategory, setListingCategory] = useState<GatedCategory>('fashion_apparel');
 
-    let tierId: 1 | 2 | 3 | 4 = 1;
-    if (finalScore >= 56) tierId = 4;
-    else if (finalScore >= 46) tierId = 3;
-    else if (finalScore >= 35) tierId = 2;
-    else tierId = 1;
-
-    return {
-      breakdown,
-      sumModifiers,
-      rawScore,
-      finalScore,
-      tier: TIER_CONFIGS[tierId],
-    };
-  }, [selections]);
+  const liveListingAdjustment = listingAdjustmentFor(selections.category, listing);
+  const listingAdjustment = orderState.scoredListingAdjustment ?? liveListingAdjustment;
+  const calculation = useMemo(() => computeRisk(selections, listingAdjustment), [selections, listingAdjustment]);
 
   const tierId = calculation.tier.id as 1 | 2 | 3 | 4;
   const codLocked = pastRefusals >= REPEAT_REFUSER_THRESHOLD;
 
-  useEffect(() => {
-    setOtpVerified(false);
+  // Changing the buyer configuration starts a fresh shared order.
+  const startNewOrder = (next: { selections?: Record<string, string>; walletLinked?: boolean; pastRefusals?: number } = {}) => {
+    const nextSelections = next.selections ?? selections;
+    const nextWallet = next.walletLinked ?? walletLinked;
+    const nextRefusals = next.pastRefusals ?? pastRefusals;
+    if (next.selections) setSelections(nextSelections);
+    if (next.walletLinked !== undefined) setWalletLinked(nextWallet);
+    if (next.pastRefusals !== undefined) setPastRefusals(nextRefusals);
+    const nextTier = computeRisk(nextSelections, listingAdjustmentFor(nextSelections.category, listing)).tier.id;
+    const prepaidFirst = nextWallet && (nextTier === 4 || nextRefusals >= REPEAT_REFUSER_THRESHOLD);
+    setOrderState(newSharedOrderState(prepaidFirst ? 'prepaid' : 'cod'));
     setOtpError(false);
-    setIntentConfirmed(false);
-    setDepositPaid(false);
-    setWindowSelected(false);
-    setPickupSelected(false);
-    setOrderSubmitted(false);
     setAppealSubmitted(false);
-    setPaymentChoice(walletLinked && (calculation.tier.id === 4 || pastRefusals >= REPEAT_REFUSER_THRESHOLD) ? 'prepaid' : 'cod');
-  }, [calculation, walletLinked, pastRefusals]);
+  };
+
+  const { otpVerified, intentConfirmed, depositPaid, pickupSelected } = orderState;
+  const windowSelected = orderState.windowSelected !== null;
+  const orderPlaced = orderState.status !== 'awaiting_confirmation';
 
   const currentProduct = MOCK_PRODUCTS[selections.category] ?? MOCK_PRODUCTS.elec_refurb;
   const currentRegionObj = DIMENSIONS.region.options.find((r) => r.id === selections.region) ?? DIMENSIONS.region.options[0];
   const currentSpeedObj = DIMENSIONS.speed.options.find((s) => s.id === selections.speed) ?? DIMENSIONS.speed.options[0];
   const currentCourierObj = DIMENSIONS.courier.options.find((c) => c.id === selections.courier) ?? DIMENSIONS.courier.options[0];
 
-  const payingNow = paymentChoice === 'prepaid';
+  const payingNow = orderState.paymentMethod === 'prepaid';
+  // QR at the door is a payment method, not a pre-delivery conversion: no incentive or voucher unlock.
+  const prepaidBeforeDelivery = payingNow && orderState.paidVia !== 'qr_at_door';
   const prepaidIncentive = PREPAID_INCENTIVE[tierId];
   const subtotal = currentProduct.price;
   const shipping = currentProduct.shipping;
   const shippingVoucher = Math.min(FREE_SHIPPING_VOUCHER_CAP, shipping);
   // Tiers 3–4 release the free-shipping voucher only once the buyer has skin in the game.
-  const voucherUnlocked = tierId <= 2 || payingNow || depositPaid;
+  const voucherUnlocked = tierId <= 2 || prepaidBeforeDelivery || depositPaid;
   const appliedVoucher = voucherUnlocked ? shippingVoucher : 0;
-  const appliedIncentive = payingNow ? prepaidIncentive : 0;
+  const appliedIncentive = prepaidBeforeDelivery ? prepaidIncentive : 0;
   const totalOrderAmount = subtotal + shipping - appliedVoucher - appliedIncentive;
   const depositCredit = !payingNow && depositPaid ? SECURING_DEPOSIT : 0;
   const amountDueAtDoor = payingNow ? 0 : totalOrderAmount - depositCredit;
@@ -595,7 +760,7 @@ export default function App(): React.JSX.Element {
 
   const handleVerifyOtp = () => {
     if (otpInput === DEMO_OTP) {
-      setOtpVerified(true);
+      patchOrder({ otpVerified: true });
       setOtpError(false);
     } else {
       setOtpError(true);
@@ -604,6 +769,17 @@ export default function App(): React.JSX.Element {
 
   // Tiers 3–4 override the buyer-facing courier with the lowest-failure partner (platform-side, invisible to buyer).
   const routedCourier = tierId >= 3 ? LOW_FAILURE_COURIER : currentCourierObj;
+
+  const sharedOrder: SharedOrder = {
+    ...orderState,
+    id: SHARED_ORDER_ID,
+    riskScore: calculation.finalScore,
+    tier: tierId,
+    product: { title: currentProduct.title, price: currentProduct.price, shipping: currentProduct.shipping, category: selections.category },
+    totalOrderAmount,
+    collectAtDoor: amountDueAtDoor,
+    assignedCourier: routedCourier.label,
+  };
 
   /* --------------------------------------------------------------------------
      UNIT ECONOMICS (expected value per order at this profile)
@@ -661,9 +837,32 @@ export default function App(): React.JSX.Element {
   // Chat conversation state for the Courier AI WhatsApp simulator
   const [chatMessages, setChatMessages] = useState<Array<{ sender: 'bot' | 'buyer'; text: string; time: string }>>([]);
 
-  const activeOrder = useMemo(() => {
-    return pendingOrders.find((o) => o.id === selectedOrderId) ?? pendingOrders[0];
-  }, [pendingOrders, selectedOrderId]);
+  // The shared order seen through Tab 2's order-feed vocabulary (a view, not a copy).
+  const sharedAsPending: PendingOrder = {
+    id: SHARED_ORDER_ID,
+    orderNumber: SHARED_ORDER_NUMBER,
+    buyerName: SHARED_BUYER_NAME,
+    itemTitle: sharedOrder.product.title,
+    itemPrice: sharedOrder.totalOrderAmount,
+    region: currentRegionObj.label,
+    riskScore: sharedOrder.riskScore,
+    riskTier: sharedOrder.tier,
+    riskReason: 'Configured live in Tab 1',
+    courier: sharedOrder.assignedCourier,
+    stage: STATUS_STAGE[orderState.status === 'cancelled' ? orderState.cancelledFrom ?? 'confirmed' : orderState.status],
+    resolution: orderState.status === 'cancelled' ? 'cancelled' : orderState.intentConfirmed ? 'confirmed' : 'open',
+    paymentMode: orderState.paymentMethod,
+    activeMitigation: 'none',
+    windowSelected: orderState.windowSelected ?? undefined,
+    codDue: sharedOrder.collectAtDoor,
+    attemptCount: orderState.attemptCount,
+  };
+  const allOrders = [sharedAsPending, ...pendingOrders];
+
+  const activeOrder = allOrders.find((o) => o.id === selectedOrderId) ?? allOrders[0];
+  const isSharedActive = activeOrder.id === SHARED_ORDER_ID;
+  // The shared order converts at its own tier incentive; seeded orders use the flat post-checkout offer.
+  const activePayNowSaving = isSharedActive ? prepaidIncentive : POST_CHECKOUT_PREPAID_INCENTIVE;
 
   const isCancelled = activeOrder.resolution === 'cancelled';
   const isPrepaid = activeOrder.paymentMode === 'prepaid';
@@ -673,7 +872,29 @@ export default function App(): React.JSX.Element {
     return null;
   };
 
+  // Translates a Tab 2 order-feed patch onto the shared order, so every tab sees the change.
+  const applyToSharedOrder = (patch: Partial<PendingOrder>) => {
+    setOrderState((prev) => {
+      const next = { ...prev };
+      if (patch.resolution === 'cancelled') {
+        next.status = 'cancelled';
+        next.cancelledFrom = prev.status;
+      }
+      if (patch.resolution === 'confirmed') next.intentConfirmed = true;
+      if (patch.paymentMode === 'prepaid') {
+        next.paymentMethod = 'prepaid';
+        next.paidVia = 'post_checkout';
+      }
+      if (patch.windowSelected !== undefined) next.windowSelected = patch.windowSelected;
+      return next;
+    });
+  };
+
   const updateActiveOrder = (patch: Partial<PendingOrder>) => {
+    if (isSharedActive) {
+      applyToSharedOrder(patch);
+      return;
+    }
     setPendingOrders((prev) => prev.map((o) => (o.id === selectedOrderId ? { ...o, ...patch } : o)));
   };
 
@@ -805,6 +1026,104 @@ export default function App(): React.JSX.Element {
   };
 
   /* --------------------------------------------------------------------------
+     TAB 3: SELLER VIEW (reads the same orders as Tab 2)
+     -------------------------------------------------------------------------- */
+  // Tier 3–4 orders wait for buyer intent confirmation before the seller may pack.
+  const isHeld = (o: PendingOrder) =>
+    o.resolution === 'open' && o.riskTier >= 3 && PRE_DISPATCH_STAGES.includes(o.stage);
+  // The seller's ₱70 forward leg is saved whenever an order is cancelled before dispatch.
+  const sellerFreightSaved =
+    allOrders.filter((o) => o.resolution === 'cancelled' && PRE_DISPATCH_STAGES.includes(o.stage)).length * FORWARD_DELIVERY_COST;
+
+  const handlePackAndShip = (o: PendingOrder) => {
+    if (isHeld(o) || o.resolution === 'cancelled' || o.stage !== 'Pending Warehouse Packing') return;
+    if (o.id === SHARED_ORDER_ID) patchOrder({ status: 'in_transit' });
+    else setPendingOrders((prev) => prev.map((p) => (p.id === o.id ? { ...p, stage: 'Dispatched & In Transit' } : p)));
+    showToast(`📦 ${o.orderNumber} packed and handed to ${o.courier}.`);
+  };
+
+  const apparelDone = apparelCompleteness(listing);
+  const refurbDone = refurbCompleteness(listing);
+  const listingDone: Record<GatedCategory, number> = { fashion_apparel: apparelDone, elec_refurb: refurbDone };
+  const listingPublished: Record<GatedCategory, boolean> = {
+    fashion_apparel: listing.apparelPublished && apparelDone === 1,
+    elec_refurb: listing.refurbPublished && refurbDone === 1,
+  };
+  const categoryModifier = (cat: GatedCategory) => DIMENSIONS.category.options.find((o) => o.id === cat)?.modifier ?? 0;
+  // Predicted failure contribution falls in proportion to listing completeness.
+  const projectedContribution = (cat: GatedCategory) => categoryModifier(cat) - LISTING_MAX_REDUCTION * listingDone[cat];
+
+  const setApparelField = (size: ListingSize, field: 'chest' | 'length', value: string) =>
+    setListing((prev) => ({
+      ...prev,
+      apparelPublished: false, // editing a published listing takes it back to draft
+      apparelSizes: { ...prev.apparelSizes, [size]: { ...prev.apparelSizes[size], [field]: value.replace(/[^0-9.]/g, '') } },
+    }));
+
+  const handlePublishListing = (cat: GatedCategory) => {
+    if (listingDone[cat] < 1) return;
+    setListing((prev) => (cat === 'fashion_apparel' ? { ...prev, apparelPublished: true } : { ...prev, refurbPublished: true }));
+    showToast(`✓ ${LISTING_CASE[cat].label} listing published: category contribution ${categoryModifier(cat) >= 0 ? '+' : ''}${categoryModifier(cat)} → ${categoryModifier(cat) - LISTING_MAX_REDUCTION >= 0 ? '+' : ''}${categoryModifier(cat) - LISTING_MAX_REDUCTION} pts.`);
+  };
+
+  /* --------------------------------------------------------------------------
+     TAB 4: RIDER VIEW (acts on the shared order)
+     -------------------------------------------------------------------------- */
+  const [qrOpen, setQrOpen] = useState<boolean>(false);
+  const riderRun = allOrders.filter((o) => o.resolution !== 'cancelled' && RIDER_RUN_STAGES.includes(o.stage));
+  const cashCarried = riderRun.reduce((sum, o) => sum + collectAtDoor(o), 0);
+  const sharedOnRun = ['out_for_delivery'].includes(orderState.status);
+  const riderBuyerStatus = orderState.pickupSelected
+    ? 'Pickup point chosen at checkout'
+    : orderState.windowSelected
+      ? `At home — window ${orderState.windowSelected}`
+      : orderState.intentConfirmed
+        ? 'No window set'
+        : 'Unconfirmed';
+
+  const handleStartRun = () => {
+    if (orderState.status !== 'in_transit') return;
+    patchOrder({ status: 'out_for_delivery' });
+    showToast(`🛵 ${SHARED_ORDER_NUMBER} is out for delivery with ${sharedOrder.assignedCourier}.`);
+  };
+
+  const handleQrPaid = () => {
+    if (!sharedOnRun || payingNow) return;
+    patchOrder({ paymentMethod: 'prepaid', paidVia: 'qr_at_door' });
+    setPrepaidConvertedCount((prev) => prev + 1);
+    setLogisticsSaved((prev) => prev + CASH_HANDLING_COST);
+    setQrOpen(false);
+    showToast(`💳 ${SHARED_ORDER_NUMBER} paid by QR at the door: no cash carried. +₱${CASH_HANDLING_COST} cash handling saved.`);
+  };
+
+  const handleMarkDelivered = () => {
+    if (!sharedOnRun) return;
+    patchOrder({ status: 'delivered' });
+    setQrOpen(false);
+    showToast(`✓ ${SHARED_ORDER_NUMBER} delivered.`);
+  };
+
+  const handleAttemptFailed = () => {
+    if (!sharedOnRun) return;
+    const attempts = orderState.attemptCount + 1;
+    patchOrder({ attemptCount: attempts });
+    setQrOpen(false);
+    showToast(
+      attempts >= REROUTE_MIN_ATTEMPTS
+        ? `⚠️ Failed attempt #${attempts}. Pickup-point re-route now available.`
+        : `⚠️ Failed attempt #${attempts}. Re-attempt scheduled (re-attempts lower failure; no re-route yet).`
+    );
+  };
+
+  const rerouteSaving = REVERSE_LOGISTICS_COST - PICKUP_TRANSFER_COST;
+  const handleReroute = () => {
+    if (!sharedOnRun || orderState.attemptCount < REROUTE_MIN_ATTEMPTS) return;
+    patchOrder({ status: 'at_pickup_point' });
+    setLogisticsSaved((prev) => prev + rerouteSaving);
+    showToast(`📍 ${SHARED_ORDER_NUMBER} re-routed to pickup point. +₱${rerouteSaving} net (₱${REVERSE_LOGISTICS_COST} return avoided − ₱${PICKUP_TRANSFER_COST} transfer).`);
+  };
+
+  /* --------------------------------------------------------------------------
      CHECKOUT PAYMENT OPTIONS (phone simulator)
      -------------------------------------------------------------------------- */
   const codTheme: Record<1 | 2 | 3 | 4, string> = {
@@ -820,7 +1139,7 @@ export default function App(): React.JSX.Element {
   const prepaidOption = (
     <div className={`p-2.5 rounded-xl border-2 space-y-2 ${payingNow ? 'bg-blue-50 border-blue-500' : 'bg-white border-slate-200'}`}>
       <button
-        onClick={() => setPaymentChoice('prepaid')}
+        onClick={() => patchOrder({ paymentMethod: 'prepaid', paidVia: 'checkout' })}
         disabled={!walletLinked}
         className="w-full flex justify-between items-center text-xs font-bold text-slate-900 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
       >
@@ -889,7 +1208,7 @@ export default function App(): React.JSX.Element {
   ) : (
     <div className={`p-2.5 rounded-xl border-2 space-y-2 ${!payingNow ? codTheme[tierId] : 'bg-white border-slate-200'}`}>
       <button
-        onClick={() => setPaymentChoice('cod')}
+        onClick={() => patchOrder({ paymentMethod: 'cod', paidVia: null })}
         className="w-full flex items-center justify-between text-xs font-bold text-slate-900 cursor-pointer"
       >
         <span className="flex items-center gap-1.5">
@@ -950,13 +1269,13 @@ export default function App(): React.JSX.Element {
                   </p>
                   <div className="grid grid-cols-2 gap-1.5">
                     <button
-                      onClick={() => setIntentConfirmed(true)}
+                      onClick={() => patchOrder({ intentConfirmed: true })}
                       className="py-1.5 rounded-lg bg-slate-900 text-white text-[10px] font-bold cursor-pointer"
                     >
                       Yes, I'll be there
                     </button>
                     <button
-                      onClick={() => setPaymentChoice('prepaid')}
+                      onClick={() => patchOrder({ paymentMethod: 'prepaid', paidVia: 'checkout' })}
                       disabled={!walletLinked}
                       className="py-1.5 rounded-lg bg-[#FE2C55] text-white text-[10px] font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                     >
@@ -976,7 +1295,7 @@ export default function App(): React.JSX.Element {
                   <div className="text-[10px] font-bold text-slate-700">3. Refundable ₱{SECURING_DEPOSIT} deposit</div>
                   {!depositPaid ? (
                     <button
-                      onClick={() => setDepositPaid(true)}
+                      onClick={() => patchOrder({ depositPaid: true })}
                       className="w-full py-1.5 px-2 rounded-lg bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs flex items-center justify-center gap-1 cursor-pointer"
                     >
                       <Wallet className="w-3.5 h-3.5" />
@@ -985,7 +1304,7 @@ export default function App(): React.JSX.Element {
                   ) : (
                     <div className="text-[10px] text-emerald-900 bg-emerald-100 p-1.5 rounded flex justify-between font-bold">
                       <span>✓ ₱{SECURING_DEPOSIT} deposit paid, credited to your order</span>
-                      <button onClick={() => setDepositPaid(false)} className="underline text-[9px] cursor-pointer">Reset</button>
+                      <button onClick={() => patchOrder({ depositPaid: false })} className="underline text-[9px] cursor-pointer">Reset</button>
                     </div>
                   )}
                   <p className="text-[9px] text-slate-600 leading-snug">
@@ -1000,7 +1319,7 @@ export default function App(): React.JSX.Element {
                   </div>
                   <div className="grid grid-cols-2 gap-1.5">
                     <button
-                      onClick={() => setWindowSelected((v) => !v)}
+                      onClick={() => patchOrder({ windowSelected: windowSelected ? null : TAB1_DELIVERY_WINDOW })}
                       className={`p-1.5 rounded-lg border text-left cursor-pointer ${
                         windowSelected ? 'bg-emerald-50 border-emerald-500 ring-1 ring-emerald-400' : 'bg-white border-slate-300'
                       }`}
@@ -1008,10 +1327,10 @@ export default function App(): React.JSX.Element {
                       <div className="text-[10px] font-bold text-slate-900 flex items-center gap-1">
                         <CalendarClock className="w-3 h-3" /> Delivery window {windowSelected && '✓'}
                       </div>
-                      <div className="text-[9px] text-slate-500">Sat 9 AM – 12 PM</div>
+                      <div className="text-[9px] text-slate-500">{TAB1_DELIVERY_WINDOW}</div>
                     </button>
                     <button
-                      onClick={() => setPickupSelected((v) => !v)}
+                      onClick={() => patchOrder({ pickupSelected: !pickupSelected })}
                       className={`p-1.5 rounded-lg border text-left cursor-pointer ${
                         pickupSelected ? 'bg-emerald-50 border-emerald-500 ring-1 ring-emerald-400' : 'bg-white border-slate-300'
                       }`}
@@ -1041,7 +1360,7 @@ export default function App(): React.JSX.Element {
           TOP EXECUTIVE COMMAND BAR WITH UNIFIED TAB SWITCHER
           ==================================================================== */}
       <header className="border-b border-white/10 bg-[#121212]/95 backdrop-blur-md sticky top-0 z-40">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex flex-wrap items-center justify-between gap-3">
           
           {/* Brand & Command Center Identity */}
           <div className="flex items-center gap-3">
@@ -1072,31 +1391,25 @@ export default function App(): React.JSX.Element {
             </div>
           </div>
 
-          {/* Master Tab Switcher Toggle */}
-          <div className="flex items-center p-1 rounded-xl bg-[#1F1F23] border border-white/10 self-start md:self-auto shadow-inner">
-            <button
-              onClick={() => setActiveTab('tab1_pre')}
-              className={`px-3.5 py-2 rounded-lg text-xs font-extrabold transition-all cursor-pointer flex items-center gap-2 ${
-                activeTab === 'tab1_pre'
-                  ? 'bg-[#FE2C55] text-white shadow-md shadow-[#FE2C55]/30'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Activity className="w-3.5 h-3.5" />
-              <span>Tab 1: Pre-Checkout ML Engine</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('tab2_post')}
-              className={`px-3.5 py-2 rounded-lg text-xs font-extrabold transition-all cursor-pointer flex items-center gap-2 ${
-                activeTab === 'tab2_post'
-                  ? 'bg-[#25F4EE] text-slate-950 shadow-md shadow-[#25F4EE]/30'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Layers className="w-3.5 h-3.5" />
-              <span>Tab 2: Post-Checkout Mitigation</span>
-            </button>
+          {/* Master Tab Switcher: four views of the same shared order */}
+          <div className="grid grid-cols-2 sm:flex items-center gap-1 p-1 rounded-xl bg-[#1F1F23] border border-white/10 self-start md:self-auto shadow-inner">
+            {([
+              { key: 'tab1_pre', label: 'Tab 1: Buyer Checkout', icon: Activity, active: 'bg-[#FE2C55] text-white shadow-md shadow-[#FE2C55]/30' },
+              { key: 'tab2_post', label: 'Tab 2: Post-Checkout', icon: Layers, active: 'bg-[#25F4EE] text-slate-950 shadow-md shadow-[#25F4EE]/30' },
+              { key: 'tab3_seller', label: 'Tab 3: Seller', icon: Store, active: 'bg-amber-400 text-slate-950 shadow-md shadow-amber-400/30' },
+              { key: 'tab4_courier', label: 'Tab 4: Rider', icon: Truck, active: 'bg-violet-500 text-white shadow-md shadow-violet-500/30' },
+            ] as const).map((t) => (
+              <button
+                key={t.key}
+                onClick={() => setActiveTab(t.key)}
+                className={`px-3 py-2 rounded-lg text-xs font-extrabold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                  activeTab === t.key ? t.active : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <t.icon className="w-3.5 h-3.5" />
+                <span>{t.label}</span>
+              </button>
+            ))}
           </div>
 
           {/* Executive Context Badge & Modal */}
@@ -1190,11 +1503,7 @@ export default function App(): React.JSX.Element {
 
                     <div className="flex items-center gap-2">
                       <button
-                        onClick={() => {
-                          setSelections(DEFAULT_SELECTIONS);
-                          setWalletLinked(true);
-                          setPastRefusals(0);
-                        }}
+                        onClick={() => startNewOrder({ selections: DEFAULT_SELECTIONS, walletLinked: true, pastRefusals: 0 })}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1F1F23] hover:bg-white/10 text-slate-300 border border-white/10 transition-all cursor-pointer"
                       >
                         <RefreshCw className="w-3.5 h-3.5 text-slate-400" />
@@ -1207,7 +1516,7 @@ export default function App(): React.JSX.Element {
                             const idx = Math.floor(Math.random() * dim.options.length);
                             randomSelections[k] = dim.options[idx].id;
                           });
-                          setSelections(randomSelections);
+                          startNewOrder({ selections: randomSelections });
                         }}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-[#FE2C55] hover:bg-[#e02449] text-white shadow-md shadow-[#FE2C55]/25 transition-all cursor-pointer"
                       >
@@ -1229,7 +1538,7 @@ export default function App(): React.JSX.Element {
                         return (
                           <button
                             key={p.name}
-                            onClick={() => setSelections(p.selections)}
+                            onClick={() => startNewOrder({ selections: p.selections })}
                             className={`p-2 rounded-xl text-left border transition-all cursor-pointer ${
                               isMatch
                                 ? 'bg-[#1F1F23] border-[#25F4EE] ring-1 ring-[#25F4EE]/50'
@@ -1275,7 +1584,7 @@ export default function App(): React.JSX.Element {
 
                           <select
                             value={selections[dimKey]}
-                            onChange={(e) => setSelections((prev) => ({ ...prev, [dimKey]: e.target.value }))}
+                            onChange={(e) => startNewOrder({ selections: { ...selections, [dimKey]: e.target.value } })}
                             className="w-full bg-[#1F1F23] border border-white/15 focus:border-[#25F4EE] rounded-lg px-2.5 py-1.5 text-xs text-white font-medium outline-none cursor-pointer"
                           >
                             {dim.options.map((opt) => (
@@ -1306,7 +1615,7 @@ export default function App(): React.JSX.Element {
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <button
-                        onClick={() => setWalletLinked((v) => !v)}
+                        onClick={() => startNewOrder({ walletLinked: !walletLinked })}
                         className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[#1F1F23] border border-white/10 text-left cursor-pointer"
                       >
                         <span className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
@@ -1323,7 +1632,7 @@ export default function App(): React.JSX.Element {
                           {[0, 1, 2, 3].map((n) => (
                             <button
                               key={n}
-                              onClick={() => setPastRefusals(n)}
+                              onClick={() => startNewOrder({ pastRefusals: n })}
                               className={`w-6 h-6 rounded text-[11px] font-mono font-bold cursor-pointer ${
                                 pastRefusals === n ? 'bg-violet-500 text-white' : 'bg-[#0a0a0c] text-slate-400 hover:text-white'
                               }`}
@@ -1355,6 +1664,11 @@ export default function App(): React.JSX.Element {
                           {item.modifier >= 0 ? `+${item.modifier}%` : `${item.modifier}%`}
                         </span>
                       ))}
+                      {calculation.listingAdjustment !== 0 && (
+                        <span className="px-1.5 py-0.5 rounded bg-emerald-950/80 text-emerald-400 border border-emerald-700/60" title="Published listing from the Tab 3 Listing Quality Gate">
+                          {calculation.listingAdjustment}% listing
+                        </span>
+                      )}
                       <span className="text-slate-400">=</span>
                       <span className={`px-2 py-0.5 rounded font-bold border ${calculation.tier.theme.badgeBg}`}>
                         {calculation.finalScore}% Final Score ({calculation.tier.name})
@@ -1804,12 +2118,12 @@ export default function App(): React.JSX.Element {
                       <span>Live Pending Orders Feed (Select to Target)</span>
                     </h3>
                     <span className="text-[10px] font-mono text-slate-400">
-                      {pendingOrders.length} Pending Orders
+                      {allOrders.length} Orders
                     </span>
                   </div>
 
                   <div className="space-y-2">
-                    {pendingOrders.map((ord) => {
+                    {allOrders.map((ord) => {
                       const isSelected = ord.id === selectedOrderId;
                       return (
                         <div
@@ -1824,6 +2138,11 @@ export default function App(): React.JSX.Element {
                           <div className="space-y-0.5">
                             <div className="flex items-center gap-2">
                               <span className="text-xs font-bold text-white">{ord.orderNumber}</span>
+                              {ord.id === SHARED_ORDER_ID && (
+                                <span className="text-[9px] px-1.5 rounded font-bold bg-[#25F4EE]/15 text-[#25F4EE] border border-[#25F4EE]/40">
+                                  FROM TAB 1
+                                </span>
+                              )}
                               <span className="text-white/20">•</span>
                               <span className="text-xs text-slate-300">{ord.buyerName}</span>
                               <span className={`text-[9px] px-1.5 py-0.2 rounded font-bold ${
@@ -1863,6 +2182,262 @@ export default function App(): React.JSX.Element {
                   </div>
                 </div>
 
+              </div>
+            )}
+
+            {/* --------------------------------------------------------------
+                TAB 3: SELLER VIEW
+                PRIVACY: the seller sees the tier label only. Never the numeric risk score, and never
+                the buyer's name or phone beside a risk indicator. Showing a third party an automated
+                risk judgment about a named individual creates exposure under the Data Privacy Act of
+                2012 (RA 10173), which requires disclosure of automated decision-making and grants a
+                right to object. "This order: Tier 3" carries the decision without the problem.
+                -------------------------------------------------------------- */}
+            {activeTab === 'tab3_seller' && (
+              <div className="space-y-6 animate-in fade-in duration-300">
+
+                {/* Seller summary */}
+                <div className="bg-[#121212]/95 border border-white/10 rounded-2xl p-5 shadow-2xl space-y-4">
+                  <div className="pb-3 border-b border-white/10">
+                    <h3 className="text-sm font-extrabold text-white flex items-center gap-2">
+                      <Store className="w-4 h-4 text-amber-400" />
+                      <span>Seller Center: Order Hold Queue</span>
+                    </h3>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Tier 3–4 COD orders are held until the buyer confirms intent, so you only pack orders likely to be accepted.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="p-3 rounded-xl bg-[#0a0a0c] border border-white/10">
+                      <div className="text-[10px] text-slate-400 uppercase font-bold">Forward Freight Saved</div>
+                      <div className="text-xl font-extrabold font-mono text-emerald-400 mt-1">₱{sellerFreightSaved.toLocaleString()}</div>
+                      <div className="text-[9px] text-slate-500 mt-0.5">₱{FORWARD_DELIVERY_COST} per order cancelled before dispatch</div>
+                    </div>
+                    <div className="p-3 rounded-xl bg-[#0a0a0c] border border-white/10">
+                      <div className="text-[10px] text-slate-400 uppercase font-bold">Orders Held</div>
+                      <div className="text-xl font-extrabold font-mono text-amber-400 mt-1">{allOrders.filter(isHeld).length} Orders</div>
+                      <div className="text-[9px] text-slate-500 mt-0.5">Awaiting buyer confirmation</div>
+                    </div>
+                    <div className="p-3 rounded-xl bg-[#0a0a0c] border border-white/10">
+                      <div className="text-[10px] text-slate-400 uppercase font-bold">Your Exposure / Failed COD</div>
+                      <div className="text-xl font-extrabold font-mono text-white mt-1">₱{SELLER_FAIL_EXPOSURE}</div>
+                      <div className="text-[9px] text-slate-500 mt-0.5">Forward delivery (case cost split)</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Hold queue */}
+                <div className="bg-[#121212]/95 border border-white/10 rounded-2xl p-5 shadow-2xl space-y-3">
+                  <div className="flex items-center justify-between pb-2 border-b border-white/10">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                      <PackageCheck className="w-4 h-4 text-amber-400" />
+                      <span>Incoming Orders</span>
+                    </h3>
+                    <span className="text-[10px] font-mono text-slate-400">Risk shown as tier only</span>
+                  </div>
+                  <div className="space-y-2">
+                    {allOrders.map((o) => {
+                      const held = isHeld(o);
+                      const cancelled = o.resolution === 'cancelled';
+                      const preDispatch = PRE_DISPATCH_STAGES.includes(o.stage);
+                      const canPack = !held && !cancelled && o.stage === 'Pending Warehouse Packing';
+                      const statusLabel = cancelled
+                        ? 'CANCELLED'
+                        : held
+                          ? 'HELD — awaiting buyer confirmation'
+                          : o.stage === 'Awaiting Checkout'
+                            ? 'RELEASED — awaiting checkout'
+                            : o.stage === 'Pending Warehouse Packing'
+                              ? 'RELEASED — ready to pack'
+                              : o.stage === 'Dispatched & In Transit'
+                                ? 'SHIPPED — in transit'
+                                : o.stage === 'Out for Delivery'
+                                  ? `OUT FOR DELIVERY${o.attemptCount ? ` · ${o.attemptCount} failed attempt${o.attemptCount > 1 ? 's' : ''}` : ''}`
+                                  : o.stage === 'Delivered'
+                                    ? 'DELIVERED'
+                                    : 'AT PICKUP POINT';
+                      return (
+                        <div
+                          key={o.id}
+                          className={`p-3 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                            held ? 'bg-amber-950/20 border-amber-700/40' : 'bg-[#0a0a0c] border-white/10'
+                          }`}
+                        >
+                          <div className="space-y-1 min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-xs font-bold text-white">{o.orderNumber}</span>
+                              {o.id === SHARED_ORDER_ID && (
+                                <span className="text-[9px] px-1.5 rounded font-bold bg-[#25F4EE]/15 text-[#25F4EE] border border-[#25F4EE]/40">
+                                  FROM TAB 1
+                                </span>
+                              )}
+                              <span className={`text-[9px] px-1.5 rounded font-bold ${
+                                o.riskTier === 4 ? 'bg-rose-950/80 text-[#FE2C55] border border-rose-800' :
+                                o.riskTier === 3 ? 'bg-orange-950/80 text-orange-400 border border-orange-800' :
+                                o.riskTier === 2 ? 'bg-amber-950/80 text-amber-400 border border-amber-800' :
+                                'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
+                              }`}>
+                                Tier {o.riskTier}
+                              </span>
+                              <span className="text-[9px] px-1.5 rounded font-bold bg-white/10 text-slate-300">
+                                {o.paymentMode === 'prepaid' ? 'Prepaid' : 'COD'}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-slate-400 truncate">
+                              {o.itemTitle} • ₱{o.itemPrice.toLocaleString()}
+                            </div>
+                            <div className={`text-[10px] font-mono font-bold ${
+                              cancelled ? 'text-rose-300' : held ? 'text-amber-400' : 'text-emerald-400'
+                            }`}>
+                              {statusLabel}
+                            </div>
+                            <div className={`text-[10px] ${cancelled && preDispatch ? 'text-emerald-400 font-bold' : 'text-slate-500'}`}>
+                              {cancelled && preDispatch
+                                ? `₱${FORWARD_DELIVERY_COST} forward freight saved`
+                                : preDispatch
+                                  ? `Forward freight at risk: ₱${FORWARD_DELIVERY_COST}`
+                                  : `Forward freight committed: ₱${FORWARD_DELIVERY_COST}`}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => handlePackAndShip(o)}
+                            disabled={!canPack}
+                            className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-400 hover:bg-amber-300 text-slate-950 cursor-pointer disabled:bg-white/10 disabled:text-slate-500 disabled:cursor-not-allowed flex items-center gap-1"
+                          >
+                            {held ? <Lock className="w-3 h-3" /> : <PackageCheck className="w-3 h-3" />}
+                            {canPack || held || o.stage === 'Awaiting Checkout' ? 'Pack & Ship' : cancelled ? 'Cancelled' : 'Shipped ✓'}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Listing quality → risk model */}
+                <div className="bg-[#121212]/95 border border-white/10 rounded-2xl p-5 shadow-2xl space-y-3">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                    <Sparkles className="w-4 h-4 text-[#25F4EE]" />
+                    <span>Listing Quality → Risk Model (Supply Side)</span>
+                  </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {(Object.keys(LISTING_CASE) as GatedCategory[]).map((cat) => {
+                      const base = categoryModifier(cat);
+                      const projected = projectedContribution(cat);
+                      return (
+                        <div key={cat} className="p-3 rounded-xl bg-[#0a0a0c] border border-white/10 space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-white">{LISTING_CASE[cat].label}</span>
+                            <span className={`text-[9px] px-1.5 rounded font-bold ${
+                              listingPublished[cat] ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-white/10 text-slate-400'
+                            }`}>
+                              {listingPublished[cat] ? 'Published' : 'Draft'}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-slate-500">
+                            {LISTING_CASE[cat].share} of orders · {LISTING_CASE[cat].failure} failure
+                          </div>
+                          <div className="text-[11px] font-mono text-slate-300">
+                            Category contribution: {base >= 0 ? '+' : ''}{base} → <strong className="text-emerald-400">{projected >= 0 ? '+' : ''}{projected.toFixed(1)} pts</strong>
+                          </div>
+                          <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
+                            <div className="h-full bg-emerald-400 transition-all" style={{ width: `${listingDone[cat] * 100}%` }} />
+                          </div>
+                          <div className="text-[10px] text-slate-500">
+                            {selections.category === cat
+                              ? listingPublished[cat] && calculation.listingAdjustment === 0
+                                ? `Applies from the next order; ${SHARED_ORDER_NUMBER} was already scored at checkout.`
+                                : listingPublished[cat]
+                                ? `Applied to the Tab 1 score (−${LISTING_MAX_REDUCTION} pts).`
+                                : 'Tab 1 is selling this category: publish to lower its score.'
+                              : 'Switch Tab 1 to this category to see the score effect.'}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[10px] text-slate-500 italic">
+                    The reduction (up to {LISTING_MAX_REDUCTION} pts for a complete listing) is an unsourced planning assumption.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* --------------------------------------------------------------
+                TAB 4: COURIER / RIDER VIEW
+                -------------------------------------------------------------- */}
+            {activeTab === 'tab4_courier' && (
+              <div className="space-y-6 animate-in fade-in duration-300">
+
+                <div className="bg-[#121212]/95 border border-white/10 rounded-2xl p-5 shadow-2xl space-y-4">
+                  <div className="pb-3 border-b border-white/10">
+                    <h3 className="text-sm font-extrabold text-white flex items-center gap-2">
+                      <Truck className="w-4 h-4 text-violet-400" />
+                      <span>Rider Run Overview</span>
+                    </h3>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Every prepaid conversion, in any tab, takes cash off the rider's person.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="p-3 rounded-xl bg-[#0a0a0c] border border-violet-500/30">
+                      <div className="text-[10px] text-slate-400 uppercase font-bold">Cash Currently Carried</div>
+                      <div className="text-2xl font-extrabold font-mono text-violet-300 mt-1">₱{cashCarried.toLocaleString()}</div>
+                      <div className="text-[9px] text-slate-500 mt-0.5">
+                        Case: security concerns for couriers carrying cash drive Mindanao's 35% failure rate, the highest in the country.
+                      </div>
+                    </div>
+                    <div className="p-3 rounded-xl bg-[#0a0a0c] border border-white/10 space-y-1">
+                      <div className="text-[10px] text-slate-400 uppercase font-bold">Stops on This Run</div>
+                      {riderRun.length === 0 && <div className="text-[11px] text-slate-500">No parcels handed over yet.</div>}
+                      {riderRun.map((o) => (
+                        <div key={o.id} className="flex justify-between text-[11px]">
+                          <span className="text-slate-300 truncate">
+                            {o.orderNumber} · {o.region}
+                          </span>
+                          <span className={`font-mono font-bold shrink-0 ml-2 ${collectAtDoor(o) === 0 ? 'text-emerald-400' : 'text-white'}`}>
+                            {o.stage === 'Delivered' ? 'Delivered' : collectAtDoor(o) === 0 ? 'Prepaid' : `₱${collectAtDoor(o).toLocaleString()}`}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-[#121212]/95 border border-white/10 rounded-2xl p-5 shadow-2xl space-y-3">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                    <MapPin className="w-4 h-4 text-violet-400" />
+                    <span>Failed-Attempt Policy</span>
+                  </h3>
+                  <p className="text-[11px] text-slate-400 leading-snug">
+                    Pickup-point re-route unlocks only after the <strong className="text-white">second</strong> failed attempt. Re-attempt rate
+                    correlates inversely with failure, so diverting after one attempt would give up a lever that works.
+                  </p>
+                  <div className="grid grid-cols-4 gap-2 text-center text-[10px] font-mono">
+                    {[
+                      ['A&B', '1.8', '29%'],
+                      ['XYZ', '1.7', '26%'],
+                      ['Quick Van', '1.3', '33%'],
+                      ['Others', '1.2', '36%'],
+                    ].map(([name, attempts, fail]) => (
+                      <div key={name} className="p-2 rounded-lg bg-[#0a0a0c] border border-white/10">
+                        <div className="text-slate-300 font-sans font-bold">{name}</div>
+                        <div className="text-slate-400">{attempts} attempts</div>
+                        <div className="text-[#FE2C55]">{fail} fail</div>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-slate-500 italic">
+                    Re-route saving = ₱{REVERSE_LOGISTICS_COST} return leg avoided − ₱{PICKUP_TRANSFER_COST} transfer to pickup point (assumed) = ₱{rerouteSaving}.
+                  </p>
+                </div>
+
+                <div className="p-4 rounded-2xl bg-[#0a0a0c] border border-dashed border-white/15 text-[11px] text-slate-400 space-y-1">
+                  <div className="font-bold text-slate-200">Getting {SHARED_ORDER_NUMBER} onto the run</div>
+                  <div>1. Tab 1: place the order. 2. Tab 3: Pack & Ship. 3. Phone → Start delivery run.</div>
+                  <div>
+                    Current status: <strong className="text-white">{orderState.status.replace(/_/g, ' ')}</strong>
+                  </div>
+                </div>
               </div>
             )}
 
@@ -1923,6 +2498,12 @@ export default function App(): React.JSX.Element {
                           <div className="text-slate-500 text-[11px] truncate">
                             {currentRegionObj.label} • {currentSpeedObj.label} via {currentCourierObj.label}
                           </div>
+                          {/* Platform annotation: routing is a platform-cost lever with no buyer-facing UI. */}
+                          <div className="mt-1 text-[9px] font-mono text-slate-400 border-t border-dashed border-slate-200 pt-1">
+                            {tierId >= 3
+                              ? `Platform override: ${currentCourierObj.label} → ${routedCourier.label} (${routedCourier.actualRate} failure rate) · not shown to buyer`
+                              : `Routed to ${routedCourier.label} — ${routedCourier.actualRate} failure rate`}
+                          </div>
                         </div>
                       </div>
 
@@ -1946,8 +2527,8 @@ export default function App(): React.JSX.Element {
                         </div>
                         <div className="flex items-center justify-between bg-white/90 p-1.5 rounded-lg border border-rose-200 text-xs">
                           <span className="font-bold text-[11px] text-[#FE2C55]">Pay-Now Saving (Tier {tierId})</span>
-                          <span className={`text-[10px] font-black ${payingNow ? 'text-[#FE2C55]' : 'text-slate-500'}`}>
-                            {payingNow ? `-₱${prepaidIncentive}.00` : `Save ₱${prepaidIncentive} with GCash/Maya`}
+                          <span className={`text-[10px] font-black ${prepaidBeforeDelivery ? 'text-[#FE2C55]' : 'text-slate-500'}`}>
+                            {prepaidBeforeDelivery ? `-₱${prepaidIncentive}.00` : `Save ₱${prepaidIncentive} with GCash/Maya`}
                           </span>
                         </div>
                       </div>
@@ -1964,6 +2545,15 @@ export default function App(): React.JSX.Element {
                             </span>
                           </div>
                           <div className="text-xs font-bold text-slate-900 truncate">{currentProduct.title}</div>
+                          {selections.category === 'fashion_apparel' && (
+                            <div className="flex flex-wrap gap-1 mt-0.5">
+                              {['True to size', 'Runs small in shoulders', ...(calculation.listingAdjustment !== 0 ? ['📏 Size chart in cm'] : [])].map((tag) => (
+                                <span key={tag} className="text-[8px] font-bold px-1 py-px rounded bg-slate-100 text-slate-600 border border-slate-200">
+                                  {tag}
+                                </span>
+                              ))}
+                            </div>
+                          )}
                           <div className="flex justify-between items-center mt-0.5">
                             <span className="text-xs font-black text-[#FE2C55]">₱{currentProduct.price.toLocaleString()}</span>
                             <span className="text-[10px] text-slate-500">Qty: 1</span>
@@ -1982,8 +2572,9 @@ export default function App(): React.JSX.Element {
                         </div>
                       </div>
 
-                      {/* Payment Methods: Tier 4 shows prepaid first, COD still selectable beneath */}
-                      <div className="px-3 mt-2 space-y-2">
+                      {/* Payment Methods: Tier 4 shows prepaid first, COD still selectable beneath.
+                          Locked once placed; later changes happen post-checkout (Tabs 2 and 4). */}
+                      <fieldset disabled={orderPlaced} className="px-3 mt-2 space-y-2">
                         {tierId === 4 ? (
                           <>
                             {prepaidOption}
@@ -1995,7 +2586,7 @@ export default function App(): React.JSX.Element {
                             {prepaidOption}
                           </>
                         )}
-                      </div>
+                      </fieldset>
                     </div>
 
                     {/* Sticky Bottom Bill */}
@@ -2037,10 +2628,10 @@ export default function App(): React.JSX.Element {
                         <span className="text-sm font-mono text-[#FE2C55]">₱{amountDueAtDoor}</span>
                       </div>
 
-                      {!orderSubmitted ? (
+                      {!orderPlaced ? (
                         <button
                           disabled={!isCheckoutReady}
-                          onClick={() => setOrderSubmitted(true)}
+                          onClick={() => patchOrder({ status: 'confirmed', scoredListingAdjustment: liveListingAdjustment })}
                           className={`w-full py-2.5 px-3 rounded-xl text-xs font-extrabold transition-all cursor-pointer ${
                             isCheckoutReady ? calculation.tier.theme.buttonBg : 'bg-slate-300 text-slate-500 cursor-not-allowed'
                           }`}
@@ -2057,8 +2648,8 @@ export default function App(): React.JSX.Element {
                         </button>
                       ) : (
                         <div className="p-2 rounded-xl bg-emerald-600 text-white text-xs font-bold flex justify-between items-center">
-                          <span>✓ {payingNow ? 'Prepaid' : 'COD'} Order Confirmed ({calculation.tier.name})!</span>
-                          <button onClick={() => setOrderSubmitted(false)} className="underline text-[10px] cursor-pointer">Retest</button>
+                          <span>✓ {payingNow ? 'Prepaid' : 'COD'} {SHARED_ORDER_NUMBER} placed. Track it in Tabs 2–4</span>
+                          <button onClick={() => startNewOrder()} className="underline text-[10px] cursor-pointer">Retest</button>
                         </div>
                       )}
                     </div>
@@ -2124,7 +2715,7 @@ export default function App(): React.JSX.Element {
                                 className="w-full py-1.5 px-2 rounded-lg bg-[#FE2C55] hover:bg-[#e02449] text-white text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1 disabled:bg-violet-600 disabled:cursor-default"
                               >
                                 <Wallet className="w-3.5 h-3.5" />
-                                <span>{isPrepaid ? '✓ Paid. ₱0 to collect at door' : `Pay now and save ₱${POST_CHECKOUT_PREPAID_INCENTIVE}`}</span>
+                                <span>{isPrepaid ? '✓ Paid. ₱0 to collect at door' : `Pay now and save ₱${activePayNowSaving}`}</span>
                               </button>
                             </div>
                           )}
@@ -2208,7 +2799,7 @@ export default function App(): React.JSX.Element {
                                 <span>
                                   {isPrepaid
                                     ? '✓ Paid via GCash. Nothing to collect at door'
-                                    : `💳 Pay now via GCash and save ₱${POST_CHECKOUT_PREPAID_INCENTIVE}`}
+                                    : `💳 Pay now via GCash and save ₱${activePayNowSaving}`}
                                 </span>
                                 {isPrepaid && <CheckCircle2 className="w-4 h-4 text-violet-600" />}
                               </button>
@@ -2330,12 +2921,261 @@ export default function App(): React.JSX.Element {
                   </div>
                 )}
 
+                {/* ------------------------------------------------------------
+                    PHONE CONTENT C: TAB 3 SELLER APP — LISTING QUALITY GATE
+                    ------------------------------------------------------------ */}
+                {activeTab === 'tab3_seller' && (
+                  <div className="flex flex-col h-full bg-white animate-in fade-in duration-200">
+                    <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
+                      <span className="font-extrabold text-sm text-slate-900">Seller Center · Edit Listing</span>
+                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">Quality Gate</span>
+                    </div>
+                    <div className="p-3 space-y-2.5 overflow-y-auto max-h-[540px]">
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {(Object.keys(LISTING_CASE) as GatedCategory[]).map((cat) => (
+                          <button
+                            key={cat}
+                            onClick={() => setListingCategory(cat)}
+                            className={`py-1.5 rounded-lg text-[11px] font-bold border cursor-pointer ${
+                              listingCategory === cat ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-300'
+                            }`}
+                          >
+                            {LISTING_CASE[cat].label}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
+                        <div className="text-xs font-bold text-slate-900 truncate">{MOCK_PRODUCTS[listingCategory].title}</div>
+                        <div className="text-[10px] text-slate-500">
+                          {LISTING_CASE[listingCategory].share} of orders · {LISTING_CASE[listingCategory].failure} failure rate
+                        </div>
+                        <p className="text-[10px] text-slate-600 italic leading-snug">“{LISTING_CASE[listingCategory].driver}”</p>
+                      </div>
+
+                      <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 space-y-1">
+                        <div className="flex justify-between text-[11px] font-bold text-emerald-900">
+                          <span>Predicted failure contribution</span>
+                          <span className="font-mono">
+                            {categoryModifier(listingCategory) >= 0 ? '+' : ''}{categoryModifier(listingCategory)} →{' '}
+                            {projectedContribution(listingCategory) >= 0 ? '+' : ''}{projectedContribution(listingCategory).toFixed(1)} pts
+                          </span>
+                        </div>
+                        <div className="h-1.5 rounded-full bg-emerald-200 overflow-hidden">
+                          <div className="h-full bg-emerald-600 transition-all" style={{ width: `${listingDone[listingCategory] * 100}%` }} />
+                        </div>
+                        <div className="text-[9px] text-emerald-800">
+                          {Math.round(listingDone[listingCategory] * 100)}% complete · reduction size is an assumption
+                        </div>
+                      </div>
+
+                      {listingCategory === 'fashion_apparel' ? (
+                        <div className="space-y-1">
+                          <div className="text-[11px] font-bold text-slate-800">Size chart (cm), required for every size</div>
+                          <div className="grid grid-cols-[2rem_1fr_1fr] gap-1 items-center text-[10px]">
+                            <span />
+                            <span className="font-bold text-slate-500">Chest</span>
+                            <span className="font-bold text-slate-500">Length</span>
+                            {LISTING_SIZES.map((size) => (
+                              <React.Fragment key={size}>
+                                <span className="font-bold text-slate-700">{size}</span>
+                                {(['chest', 'length'] as const).map((field) => (
+                                  <input
+                                    key={field}
+                                    inputMode="decimal"
+                                    placeholder="cm"
+                                    value={listing.apparelSizes[size][field]}
+                                    onChange={(e) => setApparelField(size, field, e.target.value)}
+                                    className={`w-full px-2 py-1 rounded border text-xs font-mono ${
+                                      Number(listing.apparelSizes[size][field]) > 0 ? 'border-emerald-400 bg-emerald-50' : 'border-slate-300'
+                                    }`}
+                                  />
+                                ))}
+                              </React.Fragment>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          <button
+                            onClick={() => setListing((prev) => ({ ...prev, refurbPhoto: !prev.refurbPhoto, refurbPublished: false }))}
+                            className={`w-full p-2 rounded-xl border-2 border-dashed text-[11px] font-bold cursor-pointer ${
+                              listing.refurbPhoto ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : 'border-slate-300 text-slate-600'
+                            }`}
+                          >
+                            {listing.refurbPhoto ? '✓ Photo of actual unit attached (IMG_2041.jpg)' : '📷 Add photo of the actual unit (required)'}
+                          </button>
+                          <div className="text-[11px] font-bold text-slate-800">Condition grade (required)</div>
+                          {REFURB_GRADES.map((g) => (
+                            <button
+                              key={g.id}
+                              onClick={() => setListing((prev) => ({ ...prev, refurbGrade: g.id, refurbPublished: false }))}
+                              className={`w-full p-2 rounded-lg border text-left cursor-pointer ${
+                                listing.refurbGrade === g.id ? 'border-emerald-500 bg-emerald-50' : 'border-slate-300 bg-white'
+                              }`}
+                            >
+                              <div className="text-[11px] font-bold text-slate-900">Grade {g.id}</div>
+                              <div className="text-[9px] text-slate-500 leading-snug">{g.criteria}</div>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="mt-auto p-3 border-t border-slate-200">
+                      <button
+                        onClick={() => handlePublishListing(listingCategory)}
+                        disabled={listingDone[listingCategory] < 1 || listingPublished[listingCategory]}
+                        className="w-full py-2.5 rounded-xl text-xs font-extrabold bg-amber-400 hover:bg-amber-300 text-slate-950 cursor-pointer disabled:bg-slate-200 disabled:text-slate-500 disabled:cursor-not-allowed"
+                      >
+                        {listingPublished[listingCategory]
+                          ? '✓ Published'
+                          : listingDone[listingCategory] < 1
+                            ? 'Complete required fields to publish'
+                            : 'Publish Listing'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* ------------------------------------------------------------
+                    PHONE CONTENT D: TAB 4 RIDER APP — ACTIVE DELIVERY
+                    No risk tier or score is shown to the rider.
+                    ------------------------------------------------------------ */}
+                {activeTab === 'tab4_courier' && (
+                  <div className="flex flex-col h-full bg-slate-50 animate-in fade-in duration-200">
+                    <div className="bg-violet-700 text-white px-4 py-3 flex items-center justify-between">
+                      <div>
+                        <div className="text-xs font-extrabold">{sharedOrder.assignedCourier} · Rider App</div>
+                        <div className="text-[9px] text-violet-200">Rider Juan · Plate #ND-8421</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-[8px] uppercase text-violet-200 font-bold">Cash carried</div>
+                        <div className="text-xs font-mono font-black">₱{cashCarried.toLocaleString()}</div>
+                      </div>
+                    </div>
+
+                    <div className="p-3 space-y-2.5">
+                      <div className="p-3 rounded-xl bg-white border border-slate-200 space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-bold uppercase text-slate-500">Next stop</span>
+                          <span className="text-[10px] font-mono text-slate-500">{SHARED_ORDER_NUMBER}</span>
+                        </div>
+                        <div className="text-sm font-extrabold text-slate-900">{SHARED_BUYER_NAME}</div>
+                        <div className="text-[11px] text-slate-600 flex items-center gap-1">
+                          <MapPin className="w-3 h-3 text-violet-600" /> 14 Mabini St., {currentRegionObj.label}
+                        </div>
+                        <div className="text-[11px] text-slate-600 truncate">{sharedOrder.product.title}</div>
+                        <div className={`text-[11px] font-bold flex items-center gap-1 ${
+                          orderState.windowSelected || orderState.pickupSelected ? 'text-emerald-700' : orderState.intentConfirmed ? 'text-amber-700' : 'text-rose-700'
+                        }`}>
+                          <UserCheck className="w-3 h-3" /> Buyer: {riderBuyerStatus}
+                        </div>
+                      </div>
+
+                      <div className={`p-3 rounded-xl border-2 ${payingNow ? 'bg-emerald-50 border-emerald-400' : 'bg-white border-violet-300'}`}>
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-bold uppercase text-slate-500">Amount to collect</span>
+                          {payingNow && (
+                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-emerald-600 text-white">PREPAID — no cash</span>
+                          )}
+                        </div>
+                        <div className={`text-2xl font-black font-mono ${payingNow ? 'text-emerald-700' : 'text-slate-900'}`}>
+                          ₱{sharedOrder.collectAtDoor.toLocaleString()}.00
+                        </div>
+                        {orderState.attemptCount > 0 && (
+                          <div className="text-[10px] font-bold text-rose-700">Failed attempts: {orderState.attemptCount}</div>
+                        )}
+                      </div>
+
+                      {orderState.status === 'awaiting_confirmation' || orderState.status === 'confirmed' || orderState.status === 'packed' ? (
+                        <div className="p-2.5 rounded-xl bg-slate-100 border border-slate-200 text-[11px] text-slate-600 text-center">
+                          {orderState.status === 'awaiting_confirmation'
+                            ? 'Not ordered yet: place the order in Tab 1.'
+                            : 'Waiting for the seller to Pack & Ship in Tab 3.'}
+                        </div>
+                      ) : orderState.status === 'in_transit' ? (
+                        <button
+                          onClick={handleStartRun}
+                          className="w-full py-2.5 rounded-xl bg-violet-600 hover:bg-violet-700 text-white text-xs font-extrabold cursor-pointer"
+                        >
+                          🛵 Start delivery run
+                        </button>
+                      ) : orderState.status === 'out_for_delivery' ? (
+                        <div className="space-y-1.5">
+                          {!payingNow && (
+                            qrOpen ? (
+                              <div className="p-2.5 rounded-xl bg-white border border-slate-300 flex items-center gap-3">
+                                <div className="grid grid-cols-7 gap-px w-16 h-16 shrink-0" aria-label="QR code placeholder">
+                                  {Array.from({ length: 49 }, (_, i) => (
+                                    <span key={i} className={(i * 7 + (i % 5) * 3) % 3 === 0 || [0, 6, 42, 48].includes(i) ? 'bg-slate-900' : 'bg-white'} />
+                                  ))}
+                                </div>
+                                <div className="flex-1 space-y-1">
+                                  <div className="text-[10px] text-slate-600">Buyer scans to pay ₱{sharedOrder.collectAtDoor.toLocaleString()} via GCash/Maya</div>
+                                  <button
+                                    onClick={handleQrPaid}
+                                    className="w-full py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer"
+                                  >
+                                    Payment received
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => setQrOpen(true)}
+                                className="w-full py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold cursor-pointer"
+                              >
+                                📱 Collect via QR
+                              </button>
+                            )
+                          )}
+                          <div className="grid grid-cols-2 gap-1.5">
+                            <button
+                              onClick={handleMarkDelivered}
+                              className="py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer"
+                            >
+                              ✓ Mark delivered
+                            </button>
+                            <button
+                              onClick={handleAttemptFailed}
+                              className="py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
+                            >
+                              ✗ Attempt failed
+                            </button>
+                          </div>
+                          {orderState.attemptCount >= REROUTE_MIN_ATTEMPTS ? (
+                            <button
+                              onClick={handleReroute}
+                              className="w-full py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-bold cursor-pointer"
+                            >
+                              📍 Re-route to pickup point (saves ₱{rerouteSaving} net)
+                            </button>
+                          ) : orderState.attemptCount === 1 ? (
+                            <div className="text-[10px] text-slate-500 text-center">Re-attempt first. Pickup re-route unlocks after a 2nd failed attempt.</div>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <div className={`p-2.5 rounded-xl text-[11px] font-bold text-center ${
+                          orderState.status === 'cancelled' ? 'bg-rose-50 border border-rose-200 text-rose-800' : 'bg-emerald-50 border border-emerald-200 text-emerald-800'
+                        }`}>
+                          {orderState.status === 'delivered'
+                            ? `✓ Delivered${payingNow ? '' : ` · ₱${sharedOrder.collectAtDoor.toLocaleString()} cash collected`}`
+                            : orderState.status === 'at_pickup_point'
+                              ? '📍 Parcel moved to pickup point. Buyer notified to collect.'
+                              : 'Order cancelled. Return parcel to hub.'}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
               </div>
             </div>
 
             {/* Persistent Right Panel Helper Note */}
             <div className="mt-3 text-[11px] text-slate-400 font-mono text-center">
-              Active Simulator Mode: <strong className="text-white">{activeTab === 'tab1_pre' ? 'Pre-Checkout Checkout View' : `Post-Checkout (${buyerScreenState})`}</strong>
+              Active Simulator Mode: <strong className="text-white">{activeTab === 'tab1_pre' ? 'Buyer Checkout' : activeTab === 'tab2_post' ? `Buyer Post-Checkout (${buyerScreenState})` : activeTab === 'tab3_seller' ? 'Seller App: Listing Gate' : 'Rider App'}</strong>
             </div>
 
           </div>
