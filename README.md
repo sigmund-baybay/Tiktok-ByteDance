@@ -16,11 +16,14 @@
 
 In the Philippine e-commerce ecosystem, Cash on Delivery accounts for over 70% of consumer orders. However, high Return-to-Sender (RTS) rates, uncontactable buyers, and impulse remorse from creator livestreams cost marketplaces hundreds of millions in two-way reverse logistics freight:
 
-* **Monthly Philippine GMV:** `₱5.79 Billion`
-* **Monthly Order Volume:** `12.4 Million Orders`
+* **Order Volume:** `5,000,000 orders/day` at `₱800` AOV → **Monthly GMV ≈ `₱120 Billion`**
+* **COD Share:** `70%` of orders
 * **Platform Baseline COD Failure Rate:** `29.0%`
-* **Capital at Risk:** `₱1.68 Billion monthly GMV exposed to RTS`
-* **Target Recovery:** `₱420 Million+ preserved` through proactive dynamic checkout gates
+* **Cost per failed COD order:** `₱70` forward delivery (seller) + `₱50` reverse logistics (platform) + `₱60` cash handling (platform)
+  * Platform exposure: **₱110** per failed order (plus 10% forgone commission); seller exposure: **₱70**
+* **Reconciliation:** `5,000,000 × 70% × 29% × 30 days × ₱110 ≈ ₱3.35B/month` platform logistics cost (case pack: ₱3.3B)
+
+Risk modifiers are derived from the case pack's stated segment failure rates. Deflection, gate-effect and prepaid-uptake rates used in the in-app unit economics are planning assumptions, shown under a conservative / base / optimistic toggle rather than as a single headline figure.
 
 ---
 
@@ -67,25 +70,33 @@ $$\text{Final Risk Score} = \text{Clamp}\left(29\% + \sum_{i=1}^{6} M_i,\; 0\%,\
 
 ## 🎯 Proactive Choice-Architecture Risk Tiers
 
-Rather than treating COD as a binary yes/no gate, the engine categorizes scores into 4 graduated behavioral tiers:
+Predicted risk is **priced, never used to exclude**. COD stays available at every tier, and every tier has a path that works without a financial account (roughly half of Filipino adults have none).
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│  Tier 1: 0% – 34%   │ 🟢 Low Risk      │ Frictionless 1-Click COD       │
-│  Tier 2: 35% – 45%  │ 🟡 Medium Risk   │ SMS OTP Intent Verification    │
-│  Tier 3: 46% – 55%  │ 🟠 High Risk     │ ₱50 Earnest Deposit (GCash)    │
-│  Tier 4: 56%+       │ 🔴 Critical Risk │ COD Disabled + ₱20 Prepaid Off │
-└────────────────────────────────────────────────────────────────────────┘
-```
+| | Tier 1 (0–34) | Tier 2 (35–45) | Tier 3 (46–55) | Tier 4 (56+) |
+|---|---|---|---|---|
+| Banner | Frictionless 1-Click COD | Confirm your order | Secure your order | Pay now, rest easy |
+| COD available | Yes | Yes | Yes | Yes |
+| Shown first | COD | COD | COD | Prepaid |
+| Prepaid incentive | ₱5 | ₱10 | ₱15 | ₱20 |
+| SMS OTP + intent confirmation | — | Required | Required | Required |
+| Gate: wallet linked | — | — | ₱50 refundable deposit | ₱50 refundable deposit |
+| Gate: no wallet | — | — | Delivery window **or** pickup point | Delivery window **and** pickup point |
+| Courier routing | Default | Default | Prefer low-failure | Lowest-failure + speed upgrade |
+| Free-shipping voucher | Normal | Normal | After deposit / pay-now | After deposit / pay-now |
+| Post-checkout | Delivery-day reminder | + 24hr cooling-off | + courier AI outreach | All three, earliest |
 
-1. **Tier 1: Low Risk (0% – 34%) — Frictionless 1-Click COD**
-   * *Mechanism:* High-trust buyers with low risk receive zero friction. 1-click checkout maximizes GMV velocity while keeping failure rate at ~18%.
-2. **Tier 2: Medium Risk (35% – 45%) — Intent Confirmation (SMS OTP)**
-   * *Mechanism:* Sends a 4-digit verification code to the registered mobile number. Weeds out bots, burner numbers, and typo-ridden contact details before parcel dispatch.
-3. **Tier 3: High Risk (46% – 55%) — Quick Downpayment (Earnest Money)**
-   * *Mechanism:* Padlocks the COD option until a non-refundable **₱50 micro-deposit** is paid via GCash or Maya. Breaks the impulsive livestream purchase loop and offsets return freight costs if refused.
-4. **Tier 4: Critical Risk (56%+) — Pay Now, Rest Easy (COD Disabled)**
-   * *Mechanism:* COD is completely disabled for extreme-risk route/buyer combinations. Rather than losing the customer, a **₱20 discount incentive** is offered to convert them to prepaid GCash or Maya.
+* **Wallet status is a routing variable only.** It selects which gate is shown and is never a risk-score modifier.
+* **No-wallet gates are hard gates.** The order cannot be placed until they are satisfied, so the no-wallet path is never the lighter option.
+* **The ₱50 deposit is refundable.** It is refunded in full if the buyer cancels before dispatch, credited to the order on delivery, and forfeited only after a confirmed refusal to accept, never for buyer-not-at-home or address failures.
+* **Tier 2 adds intent confirmation after the OTP.** OTP only proves the number is reachable; the confirmation step targets remorse and absence.
+
+### Outside the ladder: repeat-refuser lock
+
+The only place COD is ever removed. It is triggered by **order history** (two or more confirmed refusals to accept), not by predicted score. It is graduated (1 refusal = warning, 2 = 30-day COD pause, 3+ = 90-day pause) and appealable.
+
+### Post-checkout conversion
+
+The cooling-off push, delivery-window inbox and courier AI chat each offer a **pay-now** option. A conversion sets collect-at-door to ₱0 and saves the ₱60 cash-handling cost whether or not the order would have failed.
 
 ---
 
@@ -104,7 +115,7 @@ The repository is built following **SOLID principles** and strict **Separation o
 │   ├── utils/
 │   │   └── riskCalculator.ts        # Pure, testable functions for additive scoring, clamping, tier mapping
 │   ├── hooks/
-│   │   └── useRiskSimulation.ts     # Custom hook encapsulating profile state, presets, OTP & deposit states
+│   │   └── useRiskSimulation.ts     # Custom hook encapsulating profile state, presets, OTP & deposit states (not wired into the live app)
 │   ├── components/
 │   │   ├── layout/
 │   │   │   └── TikTokHeader.tsx     # Top bar with TikTok Shop branding, GMV context & formula drawer
