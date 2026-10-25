@@ -40,6 +40,35 @@ import {
 
 const BASE_FAILURE_RATE = 29;
 
+/* --------------------------------------------------------------------------
+   COST STRUCTURE (case pack). Sellers bear forward delivery; the platform
+   bears reverse logistics and cash-handling overhead.
+   -------------------------------------------------------------------------- */
+const FORWARD_DELIVERY_COST = 70; // seller-borne
+const REVERSE_LOGISTICS_COST = 50; // platform-borne
+const CASH_HANDLING_COST = 60; // platform-borne; the only cost removed by every prepaid conversion, failed or not
+const FAILED_ORDER_LOGISTICS = FORWARD_DELIVERY_COST + REVERSE_LOGISTICS_COST + CASH_HANDLING_COST; // ₱180
+const PLATFORM_FAIL_EXPOSURE = REVERSE_LOGISTICS_COST + CASH_HANDLING_COST; // ₱110
+const SELLER_FAIL_EXPOSURE = FORWARD_DELIVERY_COST; // ₱70
+const COMMISSION_RATE = 0.1;
+
+// Market scale (case pack)
+const DAILY_ORDERS = 5_000_000;
+const AVERAGE_ORDER_VALUE = 800;
+const COD_SHARE = 0.7;
+const DAYS_PER_MONTH = 30;
+const MONTHLY_GMV = DAILY_ORDERS * AVERAGE_ORDER_VALUE * DAYS_PER_MONTH; // ₱120B
+const MONTHLY_PLATFORM_FAIL_COST =
+  DAILY_ORDERS * COD_SHARE * (BASE_FAILURE_RATE / 100) * DAYS_PER_MONTH * PLATFORM_FAIL_EXPOSURE; // ≈ ₱3.35B
+
+const SECURING_DEPOSIT = 50;
+const FREE_SHIPPING_VOUCHER_CAP = 45;
+const PREPAID_INCENTIVE: Record<1 | 2 | 3 | 4, number> = { 1: 5, 2: 10, 3: 15, 4: 20 };
+const POST_CHECKOUT_PREPAID_INCENTIVE = 20;
+const SMS_OTP_COST = 0.5;
+const DEMO_OTP = '4829';
+const REPEAT_REFUSER_THRESHOLD = 2;
+
 interface DimensionOption {
   id: string;
   label: string;
@@ -167,10 +196,11 @@ const PRESET_PROFILES = [
     name: 'Impulse Live Buyer',
     badge: 'Tier 3 (High)',
     color: 'orange',
+    // 29 + 3 + 9 + 0 + 4 + 3 + 0 = 48 → Tier 3 (46–55)
     selections: {
       region: 'visayas',
       tenure: 'lt_1m',
-      speed: 'extended',
+      speed: 'standard',
       category: 'fashion_apparel',
       scenario: 'creator_live',
       courier: 'ab_express',
@@ -198,7 +228,7 @@ const TIER_CONFIGS = {
     range: '0% – 34%',
     emoji: '🟢',
     uiState: 'Frictionless 1-Click COD',
-    copy: 'Eligible for Standard COD.',
+    copy: `Eligible for standard COD. Pay now and save ₱${PREPAID_INCENTIVE[1]}.`,
     actionSummary: 'Standard checkout proceeds normally with zero conversion friction.',
     theme: {
       bgLight: 'bg-emerald-500/10',
@@ -216,9 +246,9 @@ const TIER_CONFIGS = {
     name: 'Tier 2: Medium Risk',
     range: '35% – 45%',
     emoji: '🟡',
-    uiState: 'Intent Confirmation Required',
-    copy: 'Please confirm your mobile number via OTP to secure your COD order.',
-    actionSummary: 'Filters out automated bots and low-intent impulsive scrollers.',
+    uiState: 'Confirm your order',
+    copy: `Verify your mobile number, then confirm you still want this item to place your COD order. Pay now and save ₱${PREPAID_INCENTIVE[2]}.`,
+    actionSummary: 'SMS OTP proves the number is reachable; the intent confirmation step catches remorse and absence that OTP alone does not.',
     theme: {
       bgLight: 'bg-amber-500/10',
       border: 'border-amber-500/30',
@@ -235,9 +265,9 @@ const TIER_CONFIGS = {
     name: 'Tier 3: High Risk',
     range: '46% – 55%',
     emoji: '🟠',
-    uiState: 'Quick Downpayment (Earnest Money)',
-    copy: 'To unlock Cash on Delivery for this high-demand item, a PHP 50 securing deposit via GCash/Maya is required. The rest will be collected upon delivery.',
-    actionSummary: 'COD option is greyed out with a padlock until the micro-downpayment is made. Breaks the impulse flow state.',
+    uiState: 'Secure your order',
+    copy: `Cash on Delivery is available. Secure it with a refundable ₱${SECURING_DEPOSIT} deposit, or, without a linked wallet, commit to a delivery window or pickup point. Pay now and save ₱${PREPAID_INCENTIVE[3]}.`,
+    actionSummary: 'COD stays available. Wallet holders pay a refundable deposit; buyers without a wallet must commit to a delivery window or pickup point before ordering.',
     theme: {
       bgLight: 'bg-orange-500/10',
       border: 'border-orange-500/30',
@@ -254,9 +284,9 @@ const TIER_CONFIGS = {
     name: 'Tier 4: Critical Risk',
     range: '56%+',
     emoji: '🔴',
-    uiState: 'Pay Now, Rest Easy (COD Disabled)',
-    copy: 'COD is currently unavailable for this route/profile, but take PHP 20 off by paying with Maya or GCash!',
-    actionSummary: 'COD is completely disabled. Automatically defaults to prepaid e-Wallet/Card options with a small incentive.',
+    uiState: 'Pay now, rest easy',
+    copy: `Pay now with GCash or Maya and save ₱${PREPAID_INCENTIVE[4]}, with nothing to hand over at the door. Cash on Delivery is still available below.`,
+    actionSummary: 'Prepaid is shown first with the largest incentive. COD remains selectable behind the strongest gate: a refundable deposit, or a delivery window and pickup point.',
     theme: {
       bgLight: 'bg-rose-500/10',
       border: 'border-rose-500/30',
@@ -315,6 +345,34 @@ const MOCK_PRODUCTS: Record<string, { title: string; variant: string; price: num
   },
 };
 
+const LOW_FAILURE_COURIER = DIMENSIONS.courier.options.find((c) => c.id === 'xyz_express')!;
+
+// Unsourced planning assumptions, not measured results. Deflection = share of
+// Tier 2+ COD orders cancelled before dispatch that would otherwise have failed.
+// gateDeflection = share of remaining would-be failures removed by the Tier 3/4 gate.
+type ScenarioKey = 'conservative' | 'base' | 'optimistic';
+const SCENARIOS: Record<ScenarioKey, { label: string; verifyDeflection: number; gateDeflection: number; prepaidUptake: Record<1 | 2 | 3 | 4, number> }> = {
+  conservative: { label: 'Conservative', verifyDeflection: 0.03, gateDeflection: 0.15, prepaidUptake: { 1: 0.02, 2: 0.04, 3: 0.08, 4: 0.2 } },
+  base: { label: 'Base', verifyDeflection: 0.05, gateDeflection: 0.3, prepaidUptake: { 1: 0.04, 2: 0.08, 3: 0.15, 4: 0.35 } },
+  optimistic: { label: 'Optimistic', verifyDeflection: 0.1, gateDeflection: 0.5, prepaidUptake: { 1: 0.06, 2: 0.12, 3: 0.25, 4: 0.5 } },
+};
+
+// Tier intervention matrix. COD is available at every tier; only the
+// repeat-refuser lock (order history, outside this ladder) removes it.
+const TIER_POLICY_ROWS: Array<{ label: string; values: Record<1 | 2 | 3 | 4, string> }> = [
+  { label: 'COD available', values: { 1: 'Yes', 2: 'Yes', 3: 'Yes', 4: 'Yes' } },
+  { label: 'Shown first', values: { 1: 'COD', 2: 'COD', 3: 'COD', 4: 'Prepaid' } },
+  { label: 'Prepaid incentive', values: { 1: `₱${PREPAID_INCENTIVE[1]}`, 2: `₱${PREPAID_INCENTIVE[2]}`, 3: `₱${PREPAID_INCENTIVE[3]}`, 4: `₱${PREPAID_INCENTIVE[4]}` } },
+  { label: 'SMS OTP + intent confirm', values: { 1: '—', 2: 'Required', 3: 'Required', 4: 'Required' } },
+  { label: 'Gate (wallet linked)', values: { 1: '—', 2: '—', 3: `₱${SECURING_DEPOSIT} refundable deposit`, 4: `₱${SECURING_DEPOSIT} refundable deposit` } },
+  { label: 'Gate (no wallet)', values: { 1: '—', 2: '—', 3: 'Window OR pickup', 4: 'Window AND pickup' } },
+  { label: 'Courier routing', values: { 1: 'Default', 2: 'Default', 3: 'Prefer low-failure', 4: 'Lowest-failure + speed upgrade' } },
+  { label: 'Free-shipping voucher', values: { 1: 'Normal', 2: 'Normal', 3: 'After deposit / pay-now', 4: 'After deposit / pay-now' } },
+  { label: 'Post-checkout', values: { 1: 'Delivery-day reminder', 2: '+ 24hr cooling-off', 3: '+ courier AI outreach', 4: 'All three, earliest' } },
+];
+
+type OrderStage = 'Pending Warehouse Packing' | 'Dispatched & In Transit' | 'Out for Delivery';
+
 interface PendingOrder {
   id: string;
   orderNumber: string;
@@ -326,10 +384,33 @@ interface PendingOrder {
   riskTier: 1 | 2 | 3 | 4;
   riskReason: string;
   courier: string;
-  status: 'Pending Warehouse Packing' | 'Dispatched & In Transit' | 'Out for Delivery' | 'Order Cancelled' | 'Confirmed for Delivery';
+  stage: OrderStage;
+  resolution: 'open' | 'confirmed' | 'cancelled';
+  paymentMode: 'cod' | 'prepaid';
   activeMitigation: 'none' | 'reminder_sent' | 'window_locked' | 'ai_dispatched';
   windowSelected?: string;
 }
+
+// Seeded Tab 2 dashboard counters (restored by the Tab 2 Reset button).
+const INITIAL_IMPACT = { logisticsSaved: 1430, rtsDeflected: 9, windowsLocked: 14, prepaidConverted: 0 };
+
+// Each dispatcher action only applies at the stage it was designed for.
+const ACTION_STAGE: Record<'push_reminder' | 'inbox_window' | 'courier_chat', OrderStage> = {
+  push_reminder: 'Pending Warehouse Packing',
+  inbox_window: 'Dispatched & In Transit',
+  courier_chat: 'Out for Delivery',
+};
+
+const collectAtDoor = (order: PendingOrder) =>
+  order.paymentMode === 'prepaid' ? 0 : order.itemPrice;
+
+const courierOpeningMessage = (order: PendingOrder) => ({
+  sender: 'bot' as const,
+  text: order.paymentMode === 'prepaid'
+    ? `Magandang araw! 👋 This is ${order.courier} AI Dispatcher. Your prepaid parcel for ${order.orderNumber} is scheduled for delivery today between 1:00 PM – 3:00 PM. Will someone be home to receive it?`
+    : `Magandang araw! 👋 This is ${order.courier} AI Dispatcher. Your COD parcel for ${order.orderNumber} (₱${collectAtDoor(order).toLocaleString()}.00) is scheduled for delivery today between 1:00 PM – 3:00 PM. Will someone be home with the exact cash amount?`,
+  time: '12:45 PM',
+});
 
 const INITIAL_PENDING_ORDERS: PendingOrder[] = [
   {
@@ -343,7 +424,9 @@ const INITIAL_PENDING_ORDERS: PendingOrder[] = [
     riskTier: 3,
     riskReason: 'High-Risk Livestream Impulse',
     courier: 'A&B Express',
-    status: 'Pending Warehouse Packing',
+    stage: 'Pending Warehouse Packing',
+    resolution: 'open',
+    paymentMode: 'cod',
     activeMitigation: 'none',
   },
   {
@@ -357,7 +440,9 @@ const INITIAL_PENDING_ORDERS: PendingOrder[] = [
     riskTier: 1,
     riskReason: 'Standard NCR Verified Buyer',
     courier: 'XYZ Express',
-    status: 'Dispatched & In Transit',
+    stage: 'Dispatched & In Transit',
+    resolution: 'open',
+    paymentMode: 'cod',
     activeMitigation: 'none',
   },
   {
@@ -367,11 +452,13 @@ const INITIAL_PENDING_ORDERS: PendingOrder[] = [
     itemTitle: 'Refurbished Mini Projector',
     itemPrice: 1850,
     region: 'Mindanao (Davao)',
-    riskScore: 68,
+    riskScore: 67,
     riskTier: 4,
     riskReason: 'Critical Remote Route Anomaly',
     courier: 'Fast Express',
-    status: 'Out for Delivery',
+    stage: 'Out for Delivery',
+    resolution: 'open',
+    paymentMode: 'cod',
     activeMitigation: 'none',
   },
   {
@@ -383,9 +470,11 @@ const INITIAL_PENDING_ORDERS: PendingOrder[] = [
     region: 'Luzon (Pampanga)',
     riskScore: 41,
     riskTier: 2,
-    riskReason: 'Short Video Video Link Impulse',
+    riskReason: 'Short Video Link Impulse',
     courier: 'A&B Express',
-    status: 'Pending Warehouse Packing',
+    stage: 'Pending Warehouse Packing',
+    resolution: 'open',
+    paymentMode: 'cod',
     activeMitigation: 'none',
   },
 ];
@@ -403,18 +492,25 @@ export default function App(): React.JSX.Element {
      TAB 1 STATE: PRE-CHECKOUT ML ENGINE
      -------------------------------------------------------------------------- */
   const [selections, setSelections] = useState<Record<string, string>>(DEFAULT_SELECTIONS);
-  const [otpInput, setOtpInput] = useState<string>('4829');
+  // ROUTING ONLY. walletLinked chooses which Tier 3/4 gate the buyer sees. It must never become a
+  // risk-score modifier: penalising unbanked buyers in the score is the exclusion this design removes.
+  const [walletLinked, setWalletLinked] = useState<boolean>(true);
+  // Demonstrated abuse from order history, not predicted risk. Drives the repeat-refuser lock only.
+  const [pastRefusals, setPastRefusals] = useState<number>(0);
+  const [appealSubmitted, setAppealSubmitted] = useState<boolean>(false);
+  const [otpInput, setOtpInput] = useState<string>(DEMO_OTP);
+  const [otpError, setOtpError] = useState<boolean>(false);
   const [otpVerified, setOtpVerified] = useState<boolean>(false);
+  const [intentConfirmed, setIntentConfirmed] = useState<boolean>(false);
   const [depositPaid, setDepositPaid] = useState<boolean>(false);
+  const [windowSelected, setWindowSelected] = useState<boolean>(false);
+  const [pickupSelected, setPickupSelected] = useState<boolean>(false);
+  const [paymentChoice, setPaymentChoice] = useState<'cod' | 'prepaid'>('cod');
   const [selectedPrepaidWallet, setSelectedPrepaidWallet] = useState<'gcash' | 'maya'>('gcash');
   const [orderSubmitted, setOrderSubmitted] = useState<boolean>(false);
   const [abMode, setAbMode] = useState<'with_ml' | 'without_ml'>('with_ml');
-
-  useEffect(() => {
-    setOtpVerified(false);
-    setDepositPaid(false);
-    setOrderSubmitted(false);
-  }, [selections]);
+  const [scenario, setScenario] = useState<ScenarioKey>('base');
+  const [verifyDeflectionRate, setVerifyDeflectionRate] = useState<number>(SCENARIOS.base.verifyDeflection);
 
   const calculation = useMemo(() => {
     const breakdown = Object.entries(DIMENSIONS).map(([key, dim]) => {
@@ -447,23 +543,106 @@ export default function App(): React.JSX.Element {
     };
   }, [selections]);
 
+  const tierId = calculation.tier.id as 1 | 2 | 3 | 4;
+  const codLocked = pastRefusals >= REPEAT_REFUSER_THRESHOLD;
+
+  useEffect(() => {
+    setOtpVerified(false);
+    setOtpError(false);
+    setIntentConfirmed(false);
+    setDepositPaid(false);
+    setWindowSelected(false);
+    setPickupSelected(false);
+    setOrderSubmitted(false);
+    setAppealSubmitted(false);
+    setPaymentChoice(walletLinked && (calculation.tier.id === 4 || pastRefusals >= REPEAT_REFUSER_THRESHOLD) ? 'prepaid' : 'cod');
+  }, [calculation, walletLinked, pastRefusals]);
+
   const currentProduct = MOCK_PRODUCTS[selections.category] ?? MOCK_PRODUCTS.elec_refurb;
   const currentRegionObj = DIMENSIONS.region.options.find((r) => r.id === selections.region) ?? DIMENSIONS.region.options[0];
   const currentSpeedObj = DIMENSIONS.speed.options.find((s) => s.id === selections.speed) ?? DIMENSIONS.speed.options[0];
   const currentCourierObj = DIMENSIONS.courier.options.find((c) => c.id === selections.courier) ?? DIMENSIONS.courier.options[0];
 
+  const payingNow = paymentChoice === 'prepaid';
+  const prepaidIncentive = PREPAID_INCENTIVE[tierId];
   const subtotal = currentProduct.price;
   const shipping = currentProduct.shipping;
-  const tier4Discount = calculation.tier.id === 4 ? 20 : 0;
-  const totalOrderAmount = subtotal + shipping - tier4Discount;
-  const tier3Deposit = 50;
-  const tier3CollectOnDelivery = totalOrderAmount - tier3Deposit;
+  const shippingVoucher = Math.min(FREE_SHIPPING_VOUCHER_CAP, shipping);
+  // Tiers 3–4 release the free-shipping voucher only once the buyer has skin in the game.
+  const voucherUnlocked = tierId <= 2 || payingNow || depositPaid;
+  const appliedVoucher = voucherUnlocked ? shippingVoucher : 0;
+  const appliedIncentive = payingNow ? prepaidIncentive : 0;
+  const totalOrderAmount = subtotal + shipping - appliedVoucher - appliedIncentive;
+  const depositCredit = !payingNow && depositPaid ? SECURING_DEPOSIT : 0;
+  const amountDueAtDoor = payingNow ? 0 : totalOrderAmount - depositCredit;
 
-  const isCheckoutReady =
-    calculation.tier.id === 1 ||
-    (calculation.tier.id === 2 && otpVerified) ||
-    (calculation.tier.id === 3 && depositPaid) ||
-    calculation.tier.id === 4;
+  // Tier 3–4 COD gate. Both no-wallet gates are hard gates so the no-wallet path is never the lighter option.
+  const codGateSatisfied =
+    tierId <= 2 ||
+    (walletLinked ? depositPaid : tierId === 3 ? windowSelected || pickupSelected : windowSelected && pickupSelected);
+  const codReady = !codLocked && (tierId === 1 || (otpVerified && intentConfirmed && codGateSatisfied));
+  // Paying now removes the failure risk, so it skips the COD-only verification steps.
+  const isCheckoutReady = payingNow ? walletLinked : codReady;
+
+  const codNextStep =
+    codLocked ? 'COD paused: appeal or pay now'
+    : tierId >= 2 && !otpVerified ? 'Verify OTP above first'
+    : tierId >= 2 && !intentConfirmed ? 'Confirm your order above'
+    : !codGateSatisfied && walletLinked ? `Pay ₱${SECURING_DEPOSIT} refundable deposit above`
+    : !codGateSatisfied && tierId === 3 ? 'Choose a delivery window or pickup point'
+    : !codGateSatisfied ? 'Choose a delivery window and pickup point'
+    : '';
+
+  const handleVerifyOtp = () => {
+    if (otpInput === DEMO_OTP) {
+      setOtpVerified(true);
+      setOtpError(false);
+    } else {
+      setOtpError(true);
+    }
+  };
+
+  // Tiers 3–4 override the buyer-facing courier with the lowest-failure partner (platform-side, invisible to buyer).
+  const routedCourier = tierId >= 3 ? LOW_FAILURE_COURIER : currentCourierObj;
+
+  /* --------------------------------------------------------------------------
+     UNIT ECONOMICS (expected value per order at this profile)
+     -------------------------------------------------------------------------- */
+  const economics = useMemo(() => {
+    const p = calculation.finalScore / 100;
+    // Counterfactual uses the undiscounted item price, never the post-subsidy total.
+    const commission = Math.round(subtotal * COMMISSION_RATE);
+    const s = SCENARIOS[scenario];
+    const uptake = s.prepaidUptake[tierId];
+    const verifyDeflect = tierId >= 2 ? Math.min(verifyDeflectionRate, p) : 0;
+    const afterVerify = p - verifyDeflect;
+    const codFailP = tierId >= 3 ? afterVerify * (1 - s.gateDeflection) : afterVerify;
+    const failuresAvoided = p - (1 - uptake) * codFailP;
+    const exposureAvoided = failuresAvoided * PLATFORM_FAIL_EXPOSURE;
+    const cashHandlingSaved = uptake * (1 - p) * CASH_HANDLING_COST;
+    const incentiveCost = uptake * PREPAID_INCENTIVE[tierId];
+    const smsCost = tierId >= 2 ? (1 - uptake) * SMS_OTP_COST : 0;
+    const gain = exposureAvoided + cashHandlingSaved;
+    const cost = incentiveCost + smsCost;
+    return {
+      p,
+      commission,
+      uptake,
+      platformLossPerFailure: PLATFORM_FAIL_EXPOSURE + commission,
+      expectedPlatformLoss: p * (PLATFORM_FAIL_EXPOSURE + commission),
+      expectedSellerLoss: p * SELLER_FAIL_EXPOSURE,
+      failuresAvoided,
+      exposureAvoided,
+      cashHandlingSaved,
+      incentiveCost,
+      smsCost,
+      net: gain - cost,
+      roi: cost > 0 ? gain / cost : null,
+      sellerSaved: failuresAvoided * SELLER_FAIL_EXPOSURE,
+      residualFailureRate: (1 - uptake) * codFailP,
+      verifyRoi: (verifyDeflectionRate * PLATFORM_FAIL_EXPOSURE) / SMS_OTP_COST,
+    };
+  }, [calculation.finalScore, subtotal, scenario, tierId, verifyDeflectionRate]);
 
   /* --------------------------------------------------------------------------
      TAB 2 STATE: POST-CHECKOUT MITIGATION (LOGISTICS COMMAND CENTER)
@@ -473,46 +652,67 @@ export default function App(): React.JSX.Element {
   const [buyerScreenState, setBuyerScreenState] = useState<'idle' | 'push_reminder' | 'inbox_window' | 'courier_chat'>('push_reminder');
   
   // Dynamic Impact Metrics
-  const [logisticsSaved, setLogisticsSaved] = useState<number>(1430);
-  const [rtsDeflectedCount, setRtsDeflectedCount] = useState<number>(9);
-  const [windowsLockedCount, setWindowsLockedCount] = useState<number>(14);
+  const [logisticsSaved, setLogisticsSaved] = useState<number>(INITIAL_IMPACT.logisticsSaved);
+  const [rtsDeflectedCount, setRtsDeflectedCount] = useState<number>(INITIAL_IMPACT.rtsDeflected);
+  const [windowsLockedCount, setWindowsLockedCount] = useState<number>(INITIAL_IMPACT.windowsLocked);
+  const [prepaidConvertedCount, setPrepaidConvertedCount] = useState<number>(INITIAL_IMPACT.prepaidConverted);
   const [mitigationToast, setMitigationToast] = useState<string | null>(null);
 
   // Chat conversation state for the Courier AI WhatsApp simulator
-  const [chatMessages, setChatMessages] = useState<Array<{ sender: 'bot' | 'buyer'; text: string; time: string }>>([
-    {
-      sender: 'bot',
-      text: 'Magandang araw! 👋 This is Fast Express AI Dispatcher. Your COD parcel (₱800.00) is scheduled for delivery today between 1:00 PM – 3:00 PM. Will someone be home with the exact cash amount?',
-      time: '12:45 PM',
-    },
-  ]);
+  const [chatMessages, setChatMessages] = useState<Array<{ sender: 'bot' | 'buyer'; text: string; time: string }>>([]);
 
   const activeOrder = useMemo(() => {
     return pendingOrders.find((o) => o.id === selectedOrderId) ?? pendingOrders[0];
   }, [pendingOrders, selectedOrderId]);
 
+  const isCancelled = activeOrder.resolution === 'cancelled';
+  const isPrepaid = activeOrder.paymentMode === 'prepaid';
+  const actionBlockedReason = (action: keyof typeof ACTION_STAGE): string | null => {
+    if (isCancelled) return 'Order already cancelled';
+    if (activeOrder.stage !== ACTION_STAGE[action]) return `Only at "${ACTION_STAGE[action]}" (order is "${activeOrder.stage}")`;
+    return null;
+  };
+
+  const updateActiveOrder = (patch: Partial<PendingOrder>) => {
+    setPendingOrders((prev) => prev.map((o) => (o.id === selectedOrderId ? { ...o, ...patch } : o)));
+  };
+
+  const handleResetTab2 = () => {
+    setPendingOrders(INITIAL_PENDING_ORDERS);
+    setSelectedOrderId('ord-882');
+    setBuyerScreenState('push_reminder');
+    setChatMessages([]);
+    setLogisticsSaved(INITIAL_IMPACT.logisticsSaved);
+    setRtsDeflectedCount(INITIAL_IMPACT.rtsDeflected);
+    setWindowsLockedCount(INITIAL_IMPACT.windowsLocked);
+    setPrepaidConvertedCount(INITIAL_IMPACT.prepaidConverted);
+  };
+
+  const handleSelectOrder = (orderId: string) => {
+    setSelectedOrderId(orderId);
+    setBuyerScreenState('idle');
+  };
+
   // Dispatcher Actions
   const handleTriggerPushReminder = () => {
+    if (actionBlockedReason('push_reminder')) return;
     setBuyerScreenState('push_reminder');
-    setPendingOrders((prev) =>
-      prev.map((o) => (o.id === selectedOrderId ? { ...o, activeMitigation: 'reminder_sent' } : o))
-    );
+    updateActiveOrder({ activeMitigation: 'reminder_sent' });
     showToast('24-Hour Cooling Off Push Notification dispatched to buyer.');
   };
 
   const handleTriggerWindowPicker = () => {
+    if (actionBlockedReason('inbox_window')) return;
     setBuyerScreenState('inbox_window');
-    setPendingOrders((prev) =>
-      prev.map((o) => (o.id === selectedOrderId ? { ...o, activeMitigation: 'window_locked' } : o))
-    );
+    updateActiveOrder({ activeMitigation: 'window_locked' });
     showToast('Delivery Window Picker message sent to TikTok System Inbox.');
   };
 
   const handleTriggerCourierAI = () => {
+    if (actionBlockedReason('courier_chat')) return;
     setBuyerScreenState('courier_chat');
-    setPendingOrders((prev) =>
-      prev.map((o) => (o.id === selectedOrderId ? { ...o, activeMitigation: 'ai_dispatched' } : o))
-    );
+    setChatMessages([courierOpeningMessage(activeOrder)]);
+    updateActiveOrder({ activeMitigation: 'ai_dispatched' });
     showToast('Courier AI WhatsApp/Viber outreach dispatched to buyer mobile.');
   };
 
@@ -524,43 +724,65 @@ export default function App(): React.JSX.Element {
 
   // Buyer Interaction Handlers (Connected State Management)
   const handleBuyerConfirmPush = () => {
-    setPendingOrders((prev) =>
-      prev.map((o) => (o.id === selectedOrderId ? { ...o, status: 'Confirmed for Delivery' } : o))
-    );
+    if (isCancelled) return;
+    updateActiveOrder({ resolution: 'confirmed' });
     showToast('Buyer Confirmed COD Order: Pack & dispatch authorized!');
     setBuyerScreenState('idle');
   };
 
   const handleBuyerCancelPush = () => {
-    setPendingOrders((prev) =>
-      prev.map((o) => (o.id === selectedOrderId ? { ...o, status: 'Order Cancelled' } : o))
-    );
-    setLogisticsSaved((prev) => prev + 130);
+    if (isCancelled) return;
+    updateActiveOrder({ resolution: 'cancelled' });
+    // Pre-packing cancel: the parcel never ships, so forward delivery (₱70) and
+    // cash handling (₱60) are never incurred → ₱130. A prepaid order already had
+    // its ₱60 cash handling credited at conversion, so only the forward leg counts.
+    const saved = FORWARD_DELIVERY_COST + (isPrepaid ? 0 : CASH_HANDLING_COST);
+    setLogisticsSaved((prev) => prev + saved);
     setRtsDeflectedCount((prev) => prev + 1);
-    showToast('🚨 Buyer cancelled COD order prior to packing! +₱130 Forward Freight Saved.');
+    showToast(
+      isPrepaid
+        ? `🚨 Buyer cancelled prepaid order prior to packing! +₱${saved} forward freight saved.`
+        : `🚨 Buyer cancelled COD order prior to packing! +₱${saved} saved (₱${FORWARD_DELIVERY_COST} forward + ₱${CASH_HANDLING_COST} cash handling).`
+    );
     setBuyerScreenState('idle');
   };
 
+  // Converts an open COD order to prepaid. ₱60 cash handling is saved on every
+  // conversion, independent of whether the order would have failed.
+  const handleConvertToPrepaid = (source: 'push' | 'inbox' | 'chat') => {
+    if (isCancelled || isPrepaid) return;
+    updateActiveOrder({ paymentMode: 'prepaid' });
+    setPrepaidConvertedCount((prev) => prev + 1);
+    setLogisticsSaved((prev) => prev + CASH_HANDLING_COST);
+    if (source === 'chat') {
+      const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      setChatMessages((prev) => [
+        ...prev,
+        { sender: 'buyer', text: 'I will pay now via GCash. 💳', time },
+        { sender: 'bot', text: `Payment received, salamat! ${activeOrder.orderNumber} is now prepaid. Nothing to collect at the door. ✅`, time },
+      ]);
+    }
+    showToast(`💳 ${activeOrder.orderNumber} converted to prepaid: ₱0 to collect at door. +₱${CASH_HANDLING_COST} cash handling saved.`);
+  };
+
   const handleSelectDeliveryWindow = (windowLabel: string) => {
-    setPendingOrders((prev) =>
-      prev.map((o) => (o.id === selectedOrderId ? { ...o, windowSelected: windowLabel } : o))
-    );
-    setWindowsLockedCount((prev) => prev + 1);
+    if (isCancelled) return;
+    if (!activeOrder.windowSelected) setWindowsLockedCount((prev) => prev + 1);
+    updateActiveOrder({ windowSelected: windowLabel });
     showToast(`✓ Buyer selected window: ${windowLabel}. Handover guaranteed.`);
   };
 
   const handleCourierReply = (action: 'yes' | 'reschedule' | 'cancel') => {
+    if (isCancelled) return;
     const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     if (action === 'yes') {
       setChatMessages((prev) => [
         ...prev,
-        { sender: 'buyer', text: 'Yes, I am home with exact cash! 👍', time },
+        { sender: 'buyer', text: isPrepaid ? 'Yes, I am home to receive it! 👍' : 'Yes, I am home with exact cash! 👍', time },
         { sender: 'bot', text: 'Maraming salamat! Rider Juan (Plate #ND-8421) is 15 mins away. See you!', time },
       ]);
-      setPendingOrders((prev) =>
-        prev.map((o) => (o.id === selectedOrderId ? { ...o, status: 'Confirmed for Delivery' } : o))
-      );
-      showToast('Doorstep delivery confirmed with exact cash.');
+      updateActiveOrder({ resolution: 'confirmed' });
+      showToast(isPrepaid ? 'Doorstep delivery confirmed.' : 'Doorstep delivery confirmed with exact cash.');
     } else if (action === 'reschedule') {
       setChatMessages((prev) => [
         ...prev,
@@ -571,17 +793,246 @@ export default function App(): React.JSX.Element {
     } else if (action === 'cancel') {
       setChatMessages((prev) => [
         ...prev,
-        { sender: 'buyer', text: 'Please cancel my COD order. I am no longer interested.', time },
-        { sender: 'bot', text: 'Understood. Order #882 has been cancelled before rider arrival. RTS trip deflected.', time },
+        { sender: 'buyer', text: `Please cancel my ${isPrepaid ? '' : 'COD '}order. I am no longer interested.`, time },
+        { sender: 'bot', text: `Understood. ${activeOrder.orderNumber} has been cancelled before rider arrival. RTS trip deflected.`, time },
       ]);
-      setPendingOrders((prev) =>
-        prev.map((o) => (o.id === selectedOrderId ? { ...o, status: 'Order Cancelled' } : o))
-      );
-      setLogisticsSaved((prev) => prev + 180);
+      updateActiveOrder({ resolution: 'cancelled' });
+      // Out for delivery: the forward leg (₱70) is already sunk; the cancel avoids the return leg (₱50).
+      setLogisticsSaved((prev) => prev + REVERSE_LOGISTICS_COST);
       setRtsDeflectedCount((prev) => prev + 1);
-      showToast('🚨 Courier AI intercepted cancellation! +₱180 Two-Way Freight Saved.');
+      showToast(`🚨 Courier AI intercepted cancellation! +₱${REVERSE_LOGISTICS_COST} return freight saved.`);
     }
   };
+
+  /* --------------------------------------------------------------------------
+     CHECKOUT PAYMENT OPTIONS (phone simulator)
+     -------------------------------------------------------------------------- */
+  const codTheme: Record<1 | 2 | 3 | 4, string> = {
+    1: 'bg-emerald-50 border-emerald-500',
+    2: 'bg-amber-50 border-amber-400',
+    3: 'bg-orange-50 border-orange-400',
+    4: 'bg-rose-50 border-rose-400',
+  };
+
+  const choiceDot = (on: boolean) =>
+    on ? <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" /> : <span className="w-4 h-4 rounded-full border-2 border-slate-300 shrink-0" />;
+
+  const prepaidOption = (
+    <div className={`p-2.5 rounded-xl border-2 space-y-2 ${payingNow ? 'bg-blue-50 border-blue-500' : 'bg-white border-slate-200'}`}>
+      <button
+        onClick={() => setPaymentChoice('prepaid')}
+        disabled={!walletLinked}
+        className="w-full flex justify-between items-center text-xs font-bold text-slate-900 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <span className="flex items-center gap-1.5">
+          <Wallet className="w-4 h-4 text-blue-600" />
+          Pay now (GCash / Maya)
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="text-[8px] bg-[#FE2C55] text-white px-1 rounded">-₱{prepaidIncentive} OFF</span>
+          {choiceDot(payingNow)}
+        </span>
+      </button>
+      {!walletLinked && (
+        <p className="text-[10px] text-slate-500 leading-snug">
+          {codLocked
+            ? 'No linked wallet. Link GCash/Maya to pay now, or appeal the COD pause below.'
+            : `No linked wallet. Cash on Delivery stays available${tierId >= 3 ? ' with a delivery window or pickup point.' : '.'}`}
+        </p>
+      )}
+      {payingNow && walletLinked && (
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={() => setSelectedPrepaidWallet('gcash')}
+            className={`p-1.5 rounded-lg border text-xs font-extrabold text-blue-700 cursor-pointer ${
+              selectedPrepaidWallet === 'gcash' ? 'bg-white border-blue-600' : 'bg-white/60 border-slate-200'
+            }`}
+          >
+            GCash
+          </button>
+          <button
+            onClick={() => setSelectedPrepaidWallet('maya')}
+            className={`p-1.5 rounded-lg border text-xs font-extrabold text-emerald-800 cursor-pointer ${
+              selectedPrepaidWallet === 'maya' ? 'bg-white border-emerald-600' : 'bg-white/60 border-slate-200'
+            }`}
+          >
+            Maya
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
+  const codOption = codLocked ? (
+    // Repeat-refuser lock: behavioural, outside the tier ladder, and visually distinct from it.
+    <div className="p-2.5 rounded-xl bg-violet-50 border-2 border-dashed border-violet-400 space-y-1.5">
+      <div className="flex items-center gap-1.5 text-xs font-bold text-violet-900">
+        <ShieldOff className="w-3.5 h-3.5" />
+        Cash on Delivery paused ({pastRefusals >= 3 ? 90 : 30} days)
+      </div>
+      <p className="text-[10px] text-violet-800 leading-snug">
+        Your account has {pastRefusals} confirmed refusals to accept COD parcels. This pause comes from your order history, not this order's risk score.
+      </p>
+      {appealSubmitted ? (
+        <div className="text-[10px] font-bold text-violet-900 bg-violet-100 p-1.5 rounded">
+          ✓ Appeal submitted. We'll review it within 48 hours.
+        </div>
+      ) : (
+        <button
+          onClick={() => setAppealSubmitted(true)}
+          className="w-full py-1.5 rounded-lg bg-violet-600 hover:bg-violet-700 text-white text-[11px] font-bold cursor-pointer"
+        >
+          Appeal this pause
+        </button>
+      )}
+    </div>
+  ) : (
+    <div className={`p-2.5 rounded-xl border-2 space-y-2 ${!payingNow ? codTheme[tierId] : 'bg-white border-slate-200'}`}>
+      <button
+        onClick={() => setPaymentChoice('cod')}
+        className="w-full flex items-center justify-between text-xs font-bold text-slate-900 cursor-pointer"
+      >
+        <span className="flex items-center gap-1.5">
+          {tierId >= 3 && walletLinked
+            ? depositPaid ? <Unlock className="w-3.5 h-3.5 text-emerald-600" /> : <Lock className="w-3.5 h-3.5 text-orange-600" />
+            : <Truck className="w-4 h-4 text-emerald-600" />}
+          {tierId === 1 ? 'Cash on Delivery (1-Click Ready)' : 'Cash on Delivery'}
+        </span>
+        {choiceDot(!payingNow)}
+      </button>
+
+      {!payingNow && tierId >= 2 && (
+        <div className="space-y-2">
+          {/* Step 1: SMS OTP */}
+          <div className="space-y-1">
+            <div className="text-[10px] font-bold text-slate-700 flex justify-between">
+              <span>1. SMS code sent to +63 917 ••• 8421</span>
+              {otpVerified && <span className="text-emerald-700">✓ Verified</span>}
+            </div>
+            {!otpVerified && (
+              <>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    maxLength={4}
+                    value={otpInput}
+                    onChange={(e) => {
+                      setOtpInput(e.target.value);
+                      setOtpError(false);
+                    }}
+                    className="w-full bg-white border border-slate-300 rounded px-2 py-1 text-xs font-mono font-bold text-center"
+                  />
+                  <button
+                    onClick={handleVerifyOtp}
+                    className="px-2.5 py-1 rounded bg-slate-900 text-white text-xs font-bold shrink-0 cursor-pointer"
+                  >
+                    Verify
+                  </button>
+                </div>
+                <p className={`text-[9px] ${otpError ? 'text-rose-600 font-bold' : 'text-slate-500'}`}>
+                  {otpError ? `Code doesn't match. Demo code: ${DEMO_OTP}` : `Demo code: ${DEMO_OTP}`}
+                </p>
+              </>
+            )}
+          </div>
+
+          {/* Step 2: intent confirmation */}
+          {otpVerified && (
+            <div className="space-y-1 pt-1.5 border-t border-black/10">
+              <div className="text-[10px] font-bold text-slate-700 flex justify-between">
+                <span>2. Still want this?</span>
+                {intentConfirmed && <span className="text-emerald-700">✓ Confirmed</span>}
+              </div>
+              {!intentConfirmed && (
+                <>
+                  <p className="text-[10px] text-slate-600 leading-snug">
+                    You'll pay ₱{amountDueAtDoor} in cash at the door on {currentSpeedObj.label.toLowerCase()} delivery. Will you be there to accept it?
+                  </p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      onClick={() => setIntentConfirmed(true)}
+                      className="py-1.5 rounded-lg bg-slate-900 text-white text-[10px] font-bold cursor-pointer"
+                    >
+                      Yes, I'll be there
+                    </button>
+                    <button
+                      onClick={() => setPaymentChoice('prepaid')}
+                      disabled={!walletLinked}
+                      className="py-1.5 rounded-lg bg-[#FE2C55] text-white text-[10px] font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Pay now, save ₱{prepaidIncentive}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Step 3: Tier 3–4 gate, branched on wallet (routing only) */}
+          {tierId >= 3 && otpVerified && intentConfirmed && (
+            <div className="space-y-1.5 pt-1.5 border-t border-black/10">
+              {walletLinked ? (
+                <>
+                  <div className="text-[10px] font-bold text-slate-700">3. Refundable ₱{SECURING_DEPOSIT} deposit</div>
+                  {!depositPaid ? (
+                    <button
+                      onClick={() => setDepositPaid(true)}
+                      className="w-full py-1.5 px-2 rounded-lg bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs flex items-center justify-center gap-1 cursor-pointer"
+                    >
+                      <Wallet className="w-3.5 h-3.5" />
+                      Pay ₱{SECURING_DEPOSIT} Refundable Deposit ({selectedPrepaidWallet === 'gcash' ? 'GCash' : 'Maya'})
+                    </button>
+                  ) : (
+                    <div className="text-[10px] text-emerald-900 bg-emerald-100 p-1.5 rounded flex justify-between font-bold">
+                      <span>✓ ₱{SECURING_DEPOSIT} deposit paid, credited to your order</span>
+                      <button onClick={() => setDepositPaid(false)} className="underline text-[9px] cursor-pointer">Reset</button>
+                    </div>
+                  )}
+                  <p className="text-[9px] text-slate-600 leading-snug">
+                    Refunded in full if you cancel before dispatch. Credited to your order on delivery. Forfeited only after a confirmed
+                    refusal to accept, never if you're not home or the address fails.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div className="text-[10px] font-bold text-slate-700">
+                    3. {tierId === 3 ? 'Choose one to secure COD' : 'Both required to secure COD'}
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      onClick={() => setWindowSelected((v) => !v)}
+                      className={`p-1.5 rounded-lg border text-left cursor-pointer ${
+                        windowSelected ? 'bg-emerald-50 border-emerald-500 ring-1 ring-emerald-400' : 'bg-white border-slate-300'
+                      }`}
+                    >
+                      <div className="text-[10px] font-bold text-slate-900 flex items-center gap-1">
+                        <CalendarClock className="w-3 h-3" /> Delivery window {windowSelected && '✓'}
+                      </div>
+                      <div className="text-[9px] text-slate-500">Sat 9 AM – 12 PM</div>
+                    </button>
+                    <button
+                      onClick={() => setPickupSelected((v) => !v)}
+                      className={`p-1.5 rounded-lg border text-left cursor-pointer ${
+                        pickupSelected ? 'bg-emerald-50 border-emerald-500 ring-1 ring-emerald-400' : 'bg-white border-slate-300'
+                      }`}
+                    >
+                      <div className="text-[10px] font-bold text-slate-900 flex items-center gap-1">
+                        <MapPin className="w-3 h-3" /> Pickup point {pickupSelected && '✓'}
+                      </div>
+                      <div className="text-[9px] text-slate-500">Nearest partner hub</div>
+                    </button>
+                  </div>
+                  <p className="text-[9px] text-slate-600 leading-snug">
+                    No wallet needed. Required before the order can be placed.
+                  </p>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-[#010101] text-slate-100 font-sans selection:bg-[#FE2C55] selection:text-white pb-16">
@@ -656,7 +1107,7 @@ export default function App(): React.JSX.Element {
                 <span className="text-[9px] uppercase tracking-wider text-slate-400 font-bold leading-none">
                   Active PH GMV
                 </span>
-                <span className="text-xs font-mono font-bold text-white">₱5.79B/mo</span>
+                <span className="text-xs font-mono font-bold text-white">₱{(MONTHLY_GMV / 1e9).toFixed(0)}B/mo</span>
               </div>
             </div>
 
@@ -681,7 +1132,7 @@ export default function App(): React.JSX.Element {
                   Dual-Layer Architecture: Pre-Checkout ML Interception + Post-Checkout Logistics Deflection
                 </p>
                 <p className="text-slate-400 text-[11px] leading-relaxed">
-                  Tab 1 applies an additive 6-dimension ML model on a 60,000+ PH order dataset to dynamically gate checkout.
+                  Tab 1 applies an additive 6-dimension risk model, with modifiers derived from the case pack's stated segment failure rates, to price checkout friction by tier.
                   Tab 2 coordinates reactive logistics triggers (cooling-off reminders, delivery windows, and courier AI WhatsApp outreach)
                   to deflect failed doorstep RTS attempts before courier arrival.
                 </p>
@@ -739,7 +1190,11 @@ export default function App(): React.JSX.Element {
 
                     <div className="flex items-center gap-2">
                       <button
-                        onClick={() => setSelections(DEFAULT_SELECTIONS)}
+                        onClick={() => {
+                          setSelections(DEFAULT_SELECTIONS);
+                          setWalletLinked(true);
+                          setPastRefusals(0);
+                        }}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1F1F23] hover:bg-white/10 text-slate-300 border border-white/10 transition-all cursor-pointer"
                       >
                         <RefreshCw className="w-3.5 h-3.5 text-slate-400" />
@@ -839,6 +1294,51 @@ export default function App(): React.JSX.Element {
                     })}
                   </div>
 
+                  {/* Routing attributes: change which gate is shown, never the score */}
+                  <div className="p-3 rounded-xl bg-[#0a0a0c] border border-dashed border-white/20 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                        Routing Attributes
+                      </span>
+                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-white/10 text-slate-300">
+                        Not scored (0% modifier)
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <button
+                        onClick={() => setWalletLinked((v) => !v)}
+                        className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[#1F1F23] border border-white/10 text-left cursor-pointer"
+                      >
+                        <span className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                          <Wallet className="w-3.5 h-3.5 text-[#25F4EE]" />
+                          Buyer has linked wallet
+                        </span>
+                        <span className={`relative w-8 h-4 rounded-full transition-colors shrink-0 ${walletLinked ? 'bg-[#25F4EE]' : 'bg-slate-600'}`}>
+                          <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${walletLinked ? 'left-4' : 'left-0.5'}`} />
+                        </span>
+                      </button>
+                      <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[#1F1F23] border border-white/10">
+                        <span className="text-xs font-bold text-slate-200">Confirmed past refusals</span>
+                        <div className="flex items-center gap-1">
+                          {[0, 1, 2, 3].map((n) => (
+                            <button
+                              key={n}
+                              onClick={() => setPastRefusals(n)}
+                              className={`w-6 h-6 rounded text-[11px] font-mono font-bold cursor-pointer ${
+                                pastRefusals === n ? 'bg-violet-500 text-white' : 'bg-[#0a0a0c] text-slate-400 hover:text-white'
+                              }`}
+                            >
+                              {n}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                    <p className="text-[10px] text-slate-500 leading-snug">
+                      Wallet status picks the Tier 3/4 gate branch only. Past refusals feed the separate repeat-refuser lock, not the score.
+                    </p>
+                  </div>
+
                   {/* Additive Formula Bar */}
                   <div className="p-3 rounded-xl bg-[#0a0a0c] border border-white/10 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
                     <span className="text-slate-400 font-sans font-bold flex items-center gap-1">
@@ -861,6 +1361,86 @@ export default function App(): React.JSX.Element {
                       </span>
                     </div>
                   </div>
+                </div>
+
+                {/* Tier Intervention Matrix */}
+                <div className="bg-[#121212]/95 border border-white/10 rounded-2xl p-5 shadow-2xl space-y-3">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                    <Layers className="w-4 h-4 text-[#25F4EE]" />
+                    <span>Tier Intervention Matrix (Predicted Risk → Priced Friction)</span>
+                  </h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-[10px] border-collapse">
+                      <thead>
+                        <tr>
+                          <th className="text-left p-1.5 text-slate-500 font-bold" />
+                          {([1, 2, 3, 4] as const).map((t) => (
+                            <th
+                              key={t}
+                              className={`text-left p-1.5 font-extrabold whitespace-nowrap ${
+                                t === tierId ? `${TIER_CONFIGS[t].theme.bgLight} ${TIER_CONFIGS[t].theme.text}` : 'text-slate-400'
+                              }`}
+                            >
+                              {TIER_CONFIGS[t].emoji} T{t} <span className="font-mono font-normal">({TIER_CONFIGS[t].range})</span>
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {TIER_POLICY_ROWS.map((row) => (
+                          <tr key={row.label} className="border-t border-white/5">
+                            <td className="p-1.5 text-slate-400 font-bold whitespace-nowrap">{row.label}</td>
+                            {([1, 2, 3, 4] as const).map((t) => (
+                              <td
+                                key={t}
+                                className={`p-1.5 ${t === tierId ? `${TIER_CONFIGS[t].theme.bgLight} text-white font-semibold` : 'text-slate-500'}`}
+                              >
+                                {row.values[t]}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-[#0a0a0c] border border-white/10 text-[11px] flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-slate-400 font-bold flex items-center gap-1.5">
+                      <Truck className="w-3.5 h-3.5 text-[#25F4EE]" />
+                      Courier routing:
+                    </span>
+                    {tierId >= 3 ? (
+                      <span className="text-slate-200">
+                        <span className="line-through text-slate-500">{currentCourierObj.label} ({currentCourierObj.actualRate})</span>{' '}
+                        → <strong className="text-[#25F4EE]">{routedCourier.label} ({routedCourier.actualRate} failure)</strong>
+                        {tierId === 4 && <span className="text-slate-300"> + Next-Day speed upgrade</span>}
+                        <span className="block text-[10px] text-slate-500">Platform-cost intervention, invisible to the buyer.</span>
+                      </span>
+                    ) : (
+                      <span className="text-slate-200">{currentCourierObj.label} ({currentCourierObj.actualRate} failure), default</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Outside the ladder: repeat-refuser lock (demonstrated abuse, not predicted risk) */}
+                <div className={`rounded-2xl p-4 border-2 border-dashed space-y-1.5 ${
+                  codLocked ? 'bg-violet-950/30 border-violet-500/60' : 'bg-[#0a0a0c] border-violet-500/25'
+                }`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-violet-300 flex items-center gap-1.5">
+                      <ShieldOff className="w-4 h-4" />
+                      <span>Outside the Ladder: Repeat-Refuser Lock</span>
+                    </h3>
+                    <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full ${
+                      codLocked ? 'bg-violet-500 text-white' : pastRefusals === 1 ? 'bg-violet-500/20 text-violet-200' : 'bg-white/10 text-slate-400'
+                    }`}>
+                      {codLocked ? `COD paused ${pastRefusals >= 3 ? '90' : '30'} days` : pastRefusals === 1 ? 'Warning issued' : 'Inactive'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 leading-snug">
+                    Triggered only by order history: {REPEAT_REFUSER_THRESHOLD}+ confirmed refusals-to-accept (never not-at-home or address failures).
+                    Graduated (1 = warning, 2 = 30-day COD pause, 3+ = 90-day pause) and appealable. This is the only place COD is ever removed.
+                    Current buyer: <strong className="text-white">{pastRefusals} confirmed refusal{pastRefusals === 1 ? '' : 's'}</strong>.
+                  </p>
                 </div>
 
                 {/* Real-Time Unit Economics & P&L Card with A/B Toggle */}
@@ -901,104 +1481,146 @@ export default function App(): React.JSX.Element {
                   {abMode === 'without_ml' ? (
                     <div className="space-y-2 text-xs font-mono">
                       <div className="p-3 rounded-xl bg-rose-950/20 border border-rose-900/40 space-y-1.5">
-                        <div className="flex justify-between text-slate-400">
-                          <span>Two-Way Courier Return Freight (RTS):</span>
-                          <span className="text-[#FE2C55] font-bold">-₱180.00</span>
+                        <div className="text-[10px] font-sans font-bold uppercase text-slate-400">
+                          Cost of one failed COD order (₱{FAILED_ORDER_LOGISTICS} logistics + commission)
                         </div>
                         <div className="flex justify-between text-slate-400">
-                          <span>Forgone Marketplace Commission (5%):</span>
-                          <span className="text-[#FE2C55] font-bold">-₱{Math.round(totalOrderAmount * 0.05)}</span>
+                          <span>Forward delivery <span className="text-slate-500">(seller)</span>:</span>
+                          <span className="text-[#FE2C55] font-bold">-₱{FORWARD_DELIVERY_COST}.00</span>
                         </div>
                         <div className="flex justify-between text-slate-400">
-                          <span>Packaging & Inventory Delay Cost:</span>
-                          <span className="text-[#FE2C55] font-bold">-₱25.00</span>
+                          <span>Reverse logistics <span className="text-slate-500">(platform)</span>:</span>
+                          <span className="text-[#FE2C55] font-bold">-₱{REVERSE_LOGISTICS_COST}.00</span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Cash handling <span className="text-slate-500">(platform)</span>:</span>
+                          <span className="text-[#FE2C55] font-bold">-₱{CASH_HANDLING_COST}.00</span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Forgone commission ({COMMISSION_RATE * 100}% of ₱{subtotal.toLocaleString()} list price):</span>
+                          <span className="text-[#FE2C55] font-bold">-₱{economics.commission}.00</span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 pt-1.5 border-t border-rose-900/50 font-sans">
+                          <div className="p-2 rounded-lg bg-black/30">
+                            <div className="text-[10px] text-slate-400 font-bold">Platform exposure</div>
+                            <div className="text-sm font-black font-mono text-[#FE2C55]">-₱{economics.platformLossPerFailure}</div>
+                            <div className="text-[9px] text-slate-500">₱{PLATFORM_FAIL_EXPOSURE} logistics + ₱{economics.commission} commission</div>
+                          </div>
+                          <div className="p-2 rounded-lg bg-black/30">
+                            <div className="text-[10px] text-slate-400 font-bold">Seller exposure</div>
+                            <div className="text-sm font-black font-mono text-[#FE2C55]">-₱{SELLER_FAIL_EXPOSURE}</div>
+                            <div className="text-[9px] text-slate-500">Forward delivery, sunk</div>
+                          </div>
                         </div>
                         <div className="flex justify-between text-xs font-bold pt-1.5 border-t border-rose-900/50 text-white font-sans">
-                          <span>Net Platform Loss per Failed Order:</span>
-                          <span className="text-[#FE2C55] text-sm font-black font-mono">
-                            -₱{205 + Math.round(totalOrderAmount * 0.05)}
-                          </span>
+                          <span>Expected platform loss per order at {calculation.finalScore}% failure:</span>
+                          <span className="text-[#FE2C55] font-black font-mono">-₱{economics.expectedPlatformLoss.toFixed(2)}</span>
                         </div>
                       </div>
                       <p className="text-[11px] text-slate-400 font-sans italic">
-                        Without proactive ML gating, this high-risk order enters standard dispatch, resulting in doorstep refusal and guaranteed negative P&L.
+                        Without risk-priced checkout, this order enters standard COD dispatch at a {calculation.finalScore}% predicted failure rate.
                       </p>
                     </div>
                   ) : (
                     <div className="space-y-2 text-xs font-mono">
-                      <div className="p-3 rounded-xl bg-[#121216] border border-white/10 space-y-1.5">
-                        {calculation.tier.id === 4 ? (
-                          <>
-                            <div className="flex justify-between text-slate-400">
-                              <span>Courier Return Logistics Loss:</span>
-                              <span className="text-emerald-400 font-bold">₱0.00 (COD Disabled)</span>
-                            </div>
-                            <div className="flex justify-between text-slate-400">
-                              <span>GCash/Maya Prepaid Subsidy Cost:</span>
-                              <span className="text-[#FE2C55] font-bold">-₱20.00 (Incentive)</span>
-                            </div>
-                            <div className="flex justify-between text-slate-400">
-                              <span>Gross Return Freight Prevented:</span>
-                              <span className="text-emerald-400 font-bold">+₱180.00</span>
-                            </div>
-                            <div className="flex justify-between text-xs font-bold pt-1.5 border-t border-white/10 text-white font-sans">
-                              <span>Net Preserved Profit per Converted Order:</span>
-                              <span className="text-[#25F4EE] text-sm font-black font-mono">+₱160.00 (+800% ROI)</span>
-                            </div>
-                          </>
-                        ) : calculation.tier.id === 3 ? (
-                          <>
-                            <div className="flex justify-between text-slate-400">
-                              <span>Securing Earnest Deposit Collected:</span>
-                              <span className="text-orange-400 font-bold">+₱50.00 (GCash/Maya)</span>
-                            </div>
-                            <div className="flex justify-between text-slate-400">
-                              <span>Impulse Refusal Reduction:</span>
-                              <span className="text-emerald-400 font-bold">-85% Refusal Rate</span>
-                            </div>
-                            <div className="flex justify-between text-xs font-bold pt-1.5 border-t border-white/10 text-white font-sans">
-                              <span>Downpayment Offsets Reverse Logistics:</span>
-                              <span className="text-orange-400 text-sm font-black font-mono">₱50 Sunk-Cost Locked In</span>
-                            </div>
-                          </>
-                        ) : calculation.tier.id === 2 ? (
-                          <>
-                            <div className="flex justify-between text-slate-400">
-                              <span>Avoided Courier RTS Trip:</span>
-                              <span className="text-emerald-400 font-bold">+₱180.00</span>
-                            </div>
-                            <div className="flex justify-between text-slate-400">
-                              <span>SMS OTP Network Verification Cost:</span>
-                              <span className="text-amber-400 font-bold">-₱0.50</span>
-                            </div>
-                            <div className="flex justify-between text-xs font-bold pt-1.5 border-t border-white/10 text-white font-sans">
-                              <span>Net Savings per Deflected Bad Order:</span>
-                              <span className="text-emerald-400 text-sm font-black font-mono">+₱179.50 (359x ROI)</span>
-                            </div>
-                          </>
-                        ) : (
-                          <>
-                            <div className="flex justify-between text-slate-400">
-                              <span>Logistics RTS Penalty:</span>
-                              <span className="text-emerald-400 font-bold">₱0.00 (Safe Profile)</span>
-                            </div>
-                            <div className="flex justify-between text-slate-400">
-                              <span>Friction Cost:</span>
-                              <span className="text-slate-300">₱0.00</span>
-                            </div>
-                            <div className="flex justify-between text-xs font-bold pt-1.5 border-t border-white/10 text-white font-sans">
-                              <span>Full GMV Velocity Captured:</span>
-                              <span className="text-emerald-400 text-sm font-black font-mono">100% GMV Protected</span>
-                            </div>
-                          </>
-                        )}
+                      {/* Scenario toggle */}
+                      <div className="flex flex-wrap items-center justify-between gap-2 font-sans">
+                        <span className="text-[10px] font-bold uppercase text-slate-400">Assumption scenario</span>
+                        <div className="flex items-center p-0.5 rounded-lg bg-[#1F1F23] border border-white/10 text-[10px]">
+                          {(Object.keys(SCENARIOS) as ScenarioKey[]).map((k) => (
+                            <button
+                              key={k}
+                              onClick={() => {
+                                setScenario(k);
+                                setVerifyDeflectionRate(SCENARIOS[k].verifyDeflection);
+                              }}
+                              className={`px-2.5 py-1 rounded-md font-bold cursor-pointer ${
+                                scenario === k ? 'bg-white/15 text-white' : 'text-slate-400 hover:text-white'
+                              }`}
+                            >
+                              {SCENARIOS[k].label}
+                            </button>
+                          ))}
+                        </div>
                       </div>
+
+                      <div className="p-3 rounded-xl bg-[#121216] border border-white/10 space-y-1.5">
+                        <div className="text-[10px] font-sans font-bold uppercase text-slate-400">
+                          Expected value per order, {calculation.tier.name}
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Failed-delivery exposure avoided ({(economics.failuresAvoided * 100).toFixed(1)} pts × ₱{PLATFORM_FAIL_EXPOSURE}):</span>
+                          <span className="text-emerald-400 font-bold">+₱{economics.exposureAvoided.toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Cash handling saved on prepaid conversions ({(economics.uptake * 100).toFixed(0)}% uptake):</span>
+                          <span className="text-emerald-400 font-bold">+₱{economics.cashHandlingSaved.toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Prepaid incentive (₱{prepaidIncentive} × {(economics.uptake * 100).toFixed(0)}%):</span>
+                          <span className="text-[#FE2C55] font-bold">-₱{economics.incentiveCost.toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>SMS OTP (₱{SMS_OTP_COST.toFixed(2)} on every COD order at Tier 2+):</span>
+                          <span className="text-[#FE2C55] font-bold">-₱{economics.smsCost.toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between text-xs font-bold pt-1.5 border-t border-white/10 text-white font-sans">
+                          <span>Net platform value per order:</span>
+                          <span className={`text-sm font-black font-mono ${economics.net >= 0 ? 'text-[#25F4EE]' : 'text-[#FE2C55]'}`}>
+                            {economics.net >= 0 ? '+' : '-'}₱{Math.abs(economics.net).toFixed(2)}
+                            {economics.roi !== null && ` (${economics.roi.toFixed(1)}× return)`}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-[10px] text-slate-500 font-sans">
+                          <span>Predicted failure {calculation.finalScore}% → residual {(economics.residualFailureRate * 100).toFixed(1)}%</span>
+                          <span>Seller saves ₱{economics.sellerSaved.toFixed(2)} forward freight</span>
+                        </div>
+                      </div>
+
+                      {tierId >= 2 && (
+                        <div className="p-3 rounded-xl bg-[#121216] border border-amber-500/20 space-y-2 font-sans">
+                          <div className="flex justify-between items-center text-[11px]">
+                            <span className="text-slate-300 font-bold">Verification ROI (OTP + intent confirmation)</span>
+                            <span className="font-mono font-black text-amber-400">{economics.verifyRoi.toFixed(1)}×</span>
+                          </div>
+                          <div className="text-[10px] font-mono text-slate-400">
+                            P(deflect) {(verifyDeflectionRate * 100).toFixed(1)}% × ₱{PLATFORM_FAIL_EXPOSURE} ÷ ₱{SMS_OTP_COST.toFixed(2)} SMS paid on every order
+                          </div>
+                          <input
+                            type="range"
+                            min={0}
+                            max={0.2}
+                            step={0.005}
+                            value={verifyDeflectionRate}
+                            onChange={(e) => setVerifyDeflectionRate(Number(e.target.value))}
+                            className="w-full accent-amber-400 cursor-pointer"
+                            aria-label="Deflection rate"
+                          />
+                        </div>
+                      )}
+
+                      <p className="text-[10px] text-slate-500 font-sans italic leading-snug">
+                        Deflection, gate-effect and prepaid-uptake rates are unsourced planning assumptions, not measured results.
+                        Compare scenarios rather than quoting one figure.
+                      </p>
                     </div>
                   )}
+
+                  {/* Market reconciliation against the case pack */}
+                  <div className="p-2.5 rounded-xl bg-[#0a0a0c] border border-white/10 text-[10px] font-mono text-slate-400 space-y-0.5">
+                    <div className="font-sans font-bold text-slate-300 text-[11px]">Market check: platform failed-COD logistics cost</div>
+                    <div>
+                      {DAILY_ORDERS.toLocaleString()} orders/day × {COD_SHARE * 100}% COD × {BASE_FAILURE_RATE}% failure × {DAYS_PER_MONTH} days × ₱{PLATFORM_FAIL_EXPOSURE}
+                    </div>
+                    <div className="text-white font-bold">
+                      = ₱{(MONTHLY_PLATFORM_FAIL_COST / 1e9).toFixed(2)}B / month <span className="text-slate-500 font-normal">(case pack: ₱3.3B ✓)</span>
+                    </div>
+                  </div>
                 </div>
 
               </div>
             )}
+
 
             {/* --------------------------------------------------------------
                 TAB 2: POST-CHECKOUT MITIGATION (LOGISTICS COMMAND CENTER)
@@ -1018,18 +1640,27 @@ export default function App(): React.JSX.Element {
                         Real-time telemetry measuring RTS loss mitigation from reactive dispatch actions
                       </p>
                     </div>
-                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-bold">
-                      LIVE DISPATCH INTERCEPTION
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="hidden sm:inline text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-bold">
+                        LIVE DISPATCH INTERCEPTION
+                      </span>
+                      <button
+                        onClick={handleResetTab2}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1F1F23] hover:bg-white/10 text-slate-300 border border-white/10 transition-all cursor-pointer"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5 text-slate-400" />
+                        Reset
+                      </button>
+                    </div>
                   </div>
 
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
                     <div className="p-3 rounded-xl bg-[#0a0a0c] border border-white/10">
                       <div className="text-[10px] text-slate-400 uppercase font-bold">Logistics Cost Saved</div>
                       <div className="text-xl font-extrabold font-mono text-emerald-400 mt-1">
                         ₱{logisticsSaved.toLocaleString()}
                       </div>
-                      <div className="text-[9px] text-slate-500 mt-0.5">Two-way freight preserved</div>
+                      <div className="text-[9px] text-slate-500 mt-0.5">Freight + cash handling avoided</div>
                     </div>
 
                     <div className="p-3 rounded-xl bg-[#0a0a0c] border border-white/10">
@@ -1046,6 +1677,14 @@ export default function App(): React.JSX.Element {
                         {windowsLockedCount} Orders
                       </div>
                       <div className="text-[9px] text-slate-500 mt-0.5">Handover slots secured</div>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-[#0a0a0c] border border-white/10">
+                      <div className="text-[10px] text-slate-400 uppercase font-bold">COD→Prepaid Converted</div>
+                      <div className="text-xl font-extrabold font-mono text-violet-400 mt-1">
+                        {prepaidConvertedCount} Orders
+                      </div>
+                      <div className="text-[9px] text-slate-500 mt-0.5">₱{CASH_HANDLING_COST} cash handling saved each</div>
                     </div>
 
                     <div className="p-3 rounded-xl bg-[#0a0a0c] border border-white/10">
@@ -1066,16 +1705,19 @@ export default function App(): React.JSX.Element {
                       <span>Interactive Dispatcher Actions (Target: {activeOrder.orderNumber})</span>
                     </h3>
                     <p className="text-[11px] text-slate-400 mt-0.5">
-                      Trigger proactive customer interventions on the buyer's phone simulator on the right
+                      Trigger proactive customer interventions on the buyer's phone simulator on the right. Each action is enabled only at its order stage
+                      ({activeOrder.orderNumber} is <strong className="text-slate-200">{isCancelled ? 'cancelled' : activeOrder.stage}</strong>).
                     </p>
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    
+
                     {/* Action 1: Cooling-off push */}
                     <button
                       onClick={handleTriggerPushReminder}
-                      className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between group ${
+                      disabled={actionBlockedReason('push_reminder') !== null}
+                      title={actionBlockedReason('push_reminder') ?? undefined}
+                      className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between group disabled:opacity-40 disabled:cursor-not-allowed ${
                         buyerScreenState === 'push_reminder'
                           ? 'bg-[#1F1F23] border-[#FE2C55] ring-2 ring-[#FE2C55]/30'
                           : 'bg-[#0a0a0c] hover:bg-[#1F1F23] border-white/10'
@@ -1100,7 +1742,9 @@ export default function App(): React.JSX.Element {
                     {/* Action 2: Delivery window picker */}
                     <button
                       onClick={handleTriggerWindowPicker}
-                      className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between group ${
+                      disabled={actionBlockedReason('inbox_window') !== null}
+                      title={actionBlockedReason('inbox_window') ?? undefined}
+                      className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between group disabled:opacity-40 disabled:cursor-not-allowed ${
                         buyerScreenState === 'inbox_window'
                           ? 'bg-[#1F1F23] border-amber-400 ring-2 ring-amber-400/30'
                           : 'bg-[#0a0a0c] hover:bg-[#1F1F23] border-white/10'
@@ -1125,7 +1769,9 @@ export default function App(): React.JSX.Element {
                     {/* Action 3: Courier AI dispatch */}
                     <button
                       onClick={handleTriggerCourierAI}
-                      className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between group ${
+                      disabled={actionBlockedReason('courier_chat') !== null}
+                      title={actionBlockedReason('courier_chat') ?? undefined}
+                      className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between group disabled:opacity-40 disabled:cursor-not-allowed ${
                         buyerScreenState === 'courier_chat'
                           ? 'bg-[#1F1F23] border-[#25F4EE] ring-2 ring-[#25F4EE]/30'
                           : 'bg-[#0a0a0c] hover:bg-[#1F1F23] border-white/10'
@@ -1168,7 +1814,7 @@ export default function App(): React.JSX.Element {
                       return (
                         <div
                           key={ord.id}
-                          onClick={() => setSelectedOrderId(ord.id)}
+                          onClick={() => handleSelectOrder(ord.id)}
                           className={`p-3 rounded-xl border transition-all cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
                             isSelected
                               ? 'bg-[#1F1F23] border-[#25F4EE] ring-1 ring-[#25F4EE]/40'
@@ -1190,17 +1836,25 @@ export default function App(): React.JSX.Element {
                               </span>
                             </div>
                             <div className="text-[11px] text-slate-400">
-                              {ord.itemTitle} (₱{ord.itemPrice.toLocaleString()}) • {ord.region} via {ord.courier}
+                              {ord.itemTitle} (₱{ord.itemPrice.toLocaleString()}) • {ord.region} via {ord.courier} • Collect at door: ₱{collectAtDoor(ord).toLocaleString()}
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-2 self-start sm:self-auto">
+                          <div className="flex flex-wrap items-center gap-1.5 self-start sm:self-auto">
+                            {ord.paymentMode === 'prepaid' && (
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full font-bold bg-violet-950 text-violet-300 border border-violet-800">
+                                Prepaid
+                              </span>
+                            )}
+                            {ord.resolution === 'confirmed' && (
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">
+                                Confirmed
+                              </span>
+                            )}
                             <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold ${
-                              ord.status === 'Order Cancelled' ? 'bg-rose-950 text-rose-300 border border-rose-800' :
-                              ord.status === 'Confirmed for Delivery' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' :
-                              'bg-white/10 text-slate-300'
+                              ord.resolution === 'cancelled' ? 'bg-rose-950 text-rose-300 border border-rose-800' : 'bg-white/10 text-slate-300'
                             }`}>
-                              {ord.status}
+                              {ord.resolution === 'cancelled' ? 'Order Cancelled' : ord.stage}
                             </span>
                           </div>
                         </div>
@@ -1272,37 +1926,30 @@ export default function App(): React.JSX.Element {
                         </div>
                       </div>
 
-                      {/* Voucher Section: Single vs. Stacked (Tier 4) */}
-                      <div className="mx-3 mt-2 space-y-1.5">
-                        {calculation.tier.id === 4 ? (
-                          <div className="p-2.5 rounded-xl bg-gradient-to-br from-emerald-50 via-teal-50 to-rose-50 border border-emerald-300 space-y-1.5 shadow-2xs">
-                            <div className="flex items-center justify-between">
-                              <span className="text-[10px] font-black uppercase text-slate-800 flex items-center gap-1">
-                                <Ticket className="w-3.5 h-3.5 text-emerald-600" />
-                                <span>2 Vouchers Stacked & Applied</span>
-                              </span>
-                              <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-emerald-700 text-white">
-                                Non-Cannibalized
-                              </span>
-                            </div>
-                            <div className="flex items-center justify-between bg-white/90 p-1.5 rounded-lg border border-emerald-200 text-xs">
-                              <span className="font-bold text-[11px] text-emerald-900">1. Free Shipping Voucher</span>
-                              <span className="text-[10px] font-black text-emerald-700">-₱45.00</span>
-                            </div>
-                            <div className="flex items-center justify-between bg-white/90 p-1.5 rounded-lg border border-rose-200 text-xs">
-                              <span className="font-bold text-[11px] text-[#FE2C55]">2. Tier 4 Prepaid GCash Subsidy</span>
-                              <span className="text-[10px] font-black text-[#FE2C55]">-₱20.00</span>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="p-2 rounded-xl bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 flex items-center justify-between text-xs">
-                            <div className="flex items-center gap-2 text-emerald-800">
-                              <Ticket className="w-4 h-4 text-emerald-600" />
-                              <span className="font-bold text-[11px]">Free Shipping Voucher Applied</span>
-                            </div>
-                            <span className="text-[10px] font-extrabold text-emerald-700">-₱45.00</span>
-                          </div>
-                        )}
+                      {/* Voucher Section */}
+                      <div className="mx-3 mt-2 p-2.5 rounded-xl bg-gradient-to-br from-emerald-50 via-teal-50 to-rose-50 border border-emerald-200 space-y-1.5">
+                        <span className="text-[10px] font-black uppercase text-slate-800 flex items-center gap-1">
+                          <Ticket className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Vouchers</span>
+                        </span>
+                        <div className="flex items-center justify-between bg-white/90 p-1.5 rounded-lg border border-emerald-200 text-xs">
+                          <span className="font-bold text-[11px] text-emerald-900">Free Shipping Voucher</span>
+                          {shipping === 0 ? (
+                            <span className="text-[10px] font-bold text-slate-500">Shipping already free</span>
+                          ) : voucherUnlocked ? (
+                            <span className="text-[10px] font-black text-emerald-700">-₱{shippingVoucher}.00</span>
+                          ) : (
+                            <span className="text-[10px] font-bold text-slate-500 flex items-center gap-1">
+                              <Lock className="w-3 h-3" /> After deposit or pay-now
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center justify-between bg-white/90 p-1.5 rounded-lg border border-rose-200 text-xs">
+                          <span className="font-bold text-[11px] text-[#FE2C55]">Pay-Now Saving (Tier {tierId})</span>
+                          <span className={`text-[10px] font-black ${payingNow ? 'text-[#FE2C55]' : 'text-slate-500'}`}>
+                            {payingNow ? `-₱${prepaidIncentive}.00` : `Save ₱${prepaidIncentive} with GCash/Maya`}
+                          </span>
+                        </div>
                       </div>
 
                       {/* Product Card */}
@@ -1335,133 +1982,60 @@ export default function App(): React.JSX.Element {
                         </div>
                       </div>
 
-                      {/* Payment Methods */}
+                      {/* Payment Methods: Tier 4 shows prepaid first, COD still selectable beneath */}
                       <div className="px-3 mt-2 space-y-2">
-                        {calculation.tier.id === 1 && (
-                          <div className="p-2.5 rounded-xl bg-emerald-50 border-2 border-emerald-500 flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              <Truck className="w-4 h-4 text-emerald-600" />
-                              <div className="text-xs font-bold text-slate-900">Cash on Delivery (1-Click Ready)</div>
-                            </div>
-                            <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                          </div>
-                        )}
-
-                        {calculation.tier.id === 2 && (
-                          <div className="p-2.5 rounded-xl bg-amber-50 border-2 border-amber-400 space-y-2">
-                            <div className="flex justify-between items-center text-xs font-bold text-slate-900">
-                              <span>Cash on Delivery (SMS OTP Gate)</span>
-                              {otpVerified && <span className="text-[9px] text-emerald-700 bg-emerald-100 px-1 rounded">Verified</span>}
-                            </div>
-                            {!otpVerified ? (
-                              <div className="flex items-center gap-2">
-                                <input
-                                  type="text"
-                                  maxLength={4}
-                                  value={otpInput}
-                                  onChange={(e) => setOtpInput(e.target.value)}
-                                  className="w-full bg-white border border-amber-300 rounded px-2 py-1 text-xs font-mono font-bold text-center"
-                                />
-                                <button
-                                  onClick={() => setOtpVerified(true)}
-                                  className="px-2.5 py-1 rounded bg-slate-900 text-white text-xs font-bold shrink-0 cursor-pointer"
-                                >
-                                  Verify
-                                </button>
-                              </div>
-                            ) : (
-                              <div className="text-[10px] text-emerald-800 flex justify-between">
-                                <span>Mobile verified. COD unlocked!</span>
-                                <button onClick={() => setOtpVerified(false)} className="underline text-[9px] cursor-pointer">Undo</button>
-                              </div>
-                            )}
-                          </div>
-                        )}
-
-                        {calculation.tier.id === 3 && (
-                          <div className="p-2.5 rounded-xl bg-orange-50 border-2 border-orange-400 space-y-2">
-                            <div className="flex items-center justify-between text-xs font-bold text-slate-900">
-                              <span className="flex items-center gap-1.5">
-                                {depositPaid ? <Unlock className="w-3.5 h-3.5 text-emerald-600" /> : <Lock className="w-3.5 h-3.5 text-orange-600" />}
-                                <span>Cash on Delivery ({depositPaid ? 'Unlocked' : 'Locked'})</span>
-                              </span>
-                            </div>
-                            {!depositPaid ? (
-                              <button
-                                onClick={() => setDepositPaid(true)}
-                                className="w-full py-1.5 px-2 rounded-lg bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs flex items-center justify-center gap-1 cursor-pointer"
-                              >
-                                <Wallet className="w-3.5 h-3.5" />
-                                Pay ₱50 Securing Deposit (GCash)
-                              </button>
-                            ) : (
-                              <div className="text-[10px] text-emerald-900 bg-emerald-100 p-1.5 rounded flex justify-between font-bold">
-                                <span>✓ ₱50 Deposit Confirmed</span>
-                                <button onClick={() => setDepositPaid(false)} className="underline text-[9px] cursor-pointer">Reset</button>
-                              </div>
-                            )}
-                          </div>
-                        )}
-
-                        {calculation.tier.id === 4 && (
-                          <div className="space-y-1.5">
-                            <div className="p-2 rounded-xl bg-slate-200 border border-slate-300 opacity-60 flex justify-between items-center text-xs">
-                              <span className="line-through text-slate-500 font-bold">Cash on Delivery (Disabled)</span>
-                              <ShieldOff className="w-3.5 h-3.5 text-slate-500" />
-                            </div>
-                            <div className="grid grid-cols-2 gap-2">
-                              <button
-                                onClick={() => setSelectedPrepaidWallet('gcash')}
-                                className={`p-2 rounded-xl border text-left cursor-pointer ${
-                                  selectedPrepaidWallet === 'gcash' ? 'bg-blue-50 border-blue-600' : 'bg-white border-slate-200'
-                                }`}
-                              >
-                                <div className="text-xs font-extrabold text-blue-700 flex justify-between">
-                                  <span>GCash</span>
-                                  <span className="text-[8px] bg-[#FE2C55] text-white px-1 rounded">-₱20 OFF</span>
-                                </div>
-                              </button>
-                              <button
-                                onClick={() => setSelectedPrepaidWallet('maya')}
-                                className={`p-2 rounded-xl border text-left cursor-pointer ${
-                                  selectedPrepaidWallet === 'maya' ? 'bg-emerald-50 border-emerald-600' : 'bg-white border-slate-200'
-                                }`}
-                              >
-                                <div className="text-xs font-extrabold text-emerald-800 flex justify-between">
-                                  <span>Maya</span>
-                                  <span className="text-[8px] bg-[#FE2C55] text-white px-1 rounded">-₱20 OFF</span>
-                                </div>
-                              </button>
-                            </div>
-                          </div>
+                        {tierId === 4 ? (
+                          <>
+                            {prepaidOption}
+                            {codOption}
+                          </>
+                        ) : (
+                          <>
+                            {codOption}
+                            {prepaidOption}
+                          </>
                         )}
                       </div>
                     </div>
 
-                    {/* Sticky Bottom Bill with Micro-Deposit Math */}
+                    {/* Sticky Bottom Bill */}
                     <div className="bg-white border-t border-slate-200 p-3 space-y-2 sticky bottom-0 z-20">
-                      {calculation.tier.id === 3 ? (
-                        <div className="space-y-1 text-[10px]">
-                          <div className="flex justify-between text-slate-600">
-                            <span>Subtotal: ₱{subtotal} | Shipping: FREE</span>
-                          </div>
-                          {/* Required Micro-Deposit Deduction Invariant */}
-                          <div className="p-1 rounded bg-orange-50 border border-orange-200 text-orange-950 font-mono font-bold text-center">
-                            Total: ₱{totalOrderAmount} | Deposit Paid: -₱50 | Amount to Collect at Door: ₱{tier3CollectOnDelivery}
-                          </div>
-                          <div className="flex justify-between text-xs font-black text-slate-900 pt-1 border-t border-slate-100">
-                            <span>Amount to Collect at Door</span>
-                            <span className="text-sm font-mono text-[#FE2C55]">₱{tier3CollectOnDelivery}</span>
-                          </div>
+                      <div className="space-y-0.5 text-[10px] text-slate-600">
+                        <div className="flex justify-between">
+                          <span>Subtotal</span>
+                          <span className="font-mono">₱{subtotal}</span>
                         </div>
-                      ) : (
-                        <div className="space-y-1 text-[11px] text-slate-600">
-                          <div className="flex justify-between">
-                            <span>Total Payment</span>
-                            <span className="text-xs font-black font-mono text-[#FE2C55]">₱{totalOrderAmount}</span>
-                          </div>
+                        <div className="flex justify-between">
+                          <span>Shipping</span>
+                          <span className="font-mono">₱{shipping}</span>
                         </div>
-                      )}
+                        {appliedVoucher > 0 && (
+                          <div className="flex justify-between text-emerald-700">
+                            <span>Free-shipping voucher</span>
+                            <span className="font-mono">-₱{appliedVoucher}</span>
+                          </div>
+                        )}
+                        {appliedIncentive > 0 && (
+                          <div className="flex justify-between text-[#FE2C55]">
+                            <span>Pay-now saving</span>
+                            <span className="font-mono">-₱{appliedIncentive}</span>
+                          </div>
+                        )}
+                        <div className="flex justify-between font-bold text-slate-800">
+                          <span>Order total</span>
+                          <span className="font-mono">₱{totalOrderAmount}</span>
+                        </div>
+                        {depositCredit > 0 && (
+                          <div className="flex justify-between text-orange-700">
+                            <span>Refundable deposit paid</span>
+                            <span className="font-mono">-₱{depositCredit}</span>
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex justify-between text-xs font-black text-slate-900 pt-1 border-t border-slate-100">
+                        <span>Amount to Collect at Door</span>
+                        <span className="text-sm font-mono text-[#FE2C55]">₱{amountDueAtDoor}</span>
+                      </div>
 
                       {!orderSubmitted ? (
                         <button
@@ -1471,14 +2045,19 @@ export default function App(): React.JSX.Element {
                             isCheckoutReady ? calculation.tier.theme.buttonBg : 'bg-slate-300 text-slate-500 cursor-not-allowed'
                           }`}
                         >
-                          {calculation.tier.id === 1 && `Place 1-Click COD Order (₱${totalOrderAmount})`}
-                          {calculation.tier.id === 2 && (otpVerified ? `Place Verified COD Order (₱${totalOrderAmount})` : 'Verify OTP Above First')}
-                          {calculation.tier.id === 3 && (depositPaid ? `Complete COD Order (₱${tier3CollectOnDelivery} due at door)` : 'Pay ₱50 Deposit Above to Unlock')}
-                          {calculation.tier.id === 4 && `Pay Now with ${selectedPrepaidWallet.toUpperCase()} (₱${totalOrderAmount})`}
+                          {payingNow
+                            ? walletLinked
+                              ? `Pay ₱${totalOrderAmount} Now with ${selectedPrepaidWallet.toUpperCase()}`
+                              : 'Link a Wallet to Pay Now'
+                            : codReady
+                              ? tierId === 1
+                                ? `Place 1-Click COD Order (₱${amountDueAtDoor})`
+                                : `Place COD Order (₱${amountDueAtDoor} due at door)`
+                              : codNextStep}
                         </button>
                       ) : (
                         <div className="p-2 rounded-xl bg-emerald-600 text-white text-xs font-bold flex justify-between items-center">
-                          <span>✓ Order Confirmed ({calculation.tier.name})!</span>
+                          <span>✓ {payingNow ? 'Prepaid' : 'COD'} Order Confirmed ({calculation.tier.name})!</span>
                           <button onClick={() => setOrderSubmitted(false)} className="underline text-[10px] cursor-pointer">Retest</button>
                         </div>
                       )}
@@ -1513,26 +2092,42 @@ export default function App(): React.JSX.Element {
                               Packing Alert for {activeOrder.orderNumber}
                             </div>
                             <p className="text-[11px] text-slate-600 leading-snug mt-0.5">
-                              Your COD order (<strong className="text-slate-800">{activeOrder.itemTitle}</strong> — ₱{activeOrder.itemPrice}) is about to be packed by the warehouse. Still want it?
+                              Your {isPrepaid ? 'prepaid' : 'COD'} order (<strong className="text-slate-800">{activeOrder.itemTitle}</strong> — ₱{activeOrder.itemPrice}) is about to be packed by the warehouse. Still want it?
                             </p>
                           </div>
 
-                          <div className="grid grid-cols-2 gap-2 pt-1">
-                            <button
-                              onClick={handleBuyerConfirmPush}
-                              className="py-1.5 px-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
-                            >
-                              <Check className="w-3.5 h-3.5" />
-                              <span>Confirm Order</span>
-                            </button>
-                            <button
-                              onClick={handleBuyerCancelPush}
-                              className="py-1.5 px-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
-                            >
-                              <X className="w-3.5 h-3.5" />
-                              <span>Cancel Order</span>
-                            </button>
-                          </div>
+                          {isCancelled ? (
+                            <div className="p-2 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-[11px] font-bold text-center">
+                              Order cancelled. No further action needed.
+                            </div>
+                          ) : (
+                            <div className="space-y-2 pt-1">
+                              <div className="grid grid-cols-2 gap-2">
+                                <button
+                                  onClick={handleBuyerConfirmPush}
+                                  className="py-1.5 px-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                  <span>Confirm</span>
+                                </button>
+                                <button
+                                  onClick={handleBuyerCancelPush}
+                                  className="py-1.5 px-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                  <span>Cancel</span>
+                                </button>
+                              </div>
+                              <button
+                                onClick={() => handleConvertToPrepaid('push')}
+                                disabled={isPrepaid}
+                                className="w-full py-1.5 px-2 rounded-lg bg-[#FE2C55] hover:bg-[#e02449] text-white text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1 disabled:bg-violet-600 disabled:cursor-default"
+                              >
+                                <Wallet className="w-3.5 h-3.5" />
+                                <span>{isPrepaid ? '✓ Paid. ₱0 to collect at door' : `Pay now and save ₱${POST_CHECKOUT_PREPAID_INCENTIVE}`}</span>
+                              </button>
+                            </div>
+                          )}
                         </div>
 
                         {/* Background App Feed Visual Context */}
@@ -1568,7 +2163,9 @@ export default function App(): React.JSX.Element {
                               </p>
                               <p className="text-[11px]">
                                 Kumusta Juan! Your parcel for <strong className="text-slate-900">{activeOrder.orderNumber}</strong> is currently in transit.
-                                When will you be home to receive your package and pay cash?
+                                {isPrepaid
+                                  ? 'Your order is prepaid. When will you be home to receive your package?'
+                                  : `When will you be home to receive your package and pay ₱${collectAtDoor(activeOrder).toLocaleString()} cash?`}
                               </p>
                               <p className="text-[10px] text-slate-500 font-semibold">
                                 Select a delivery window to guarantee successful courier dispatch:
@@ -1587,7 +2184,8 @@ export default function App(): React.JSX.Element {
                                   <button
                                     key={slot}
                                     onClick={() => handleSelectDeliveryWindow(slot)}
-                                    className={`w-full p-2.5 rounded-xl border text-left text-xs font-bold transition-all cursor-pointer flex items-center justify-between ${
+                                    disabled={isCancelled}
+                                    className={`w-full disabled:opacity-40 disabled:cursor-not-allowed p-2.5 rounded-xl border text-left text-xs font-bold transition-all cursor-pointer flex items-center justify-between ${
                                       isPicked
                                         ? 'bg-emerald-50 border-emerald-500 text-emerald-900 ring-1 ring-emerald-400'
                                         : 'bg-white hover:bg-slate-50 border-slate-300 text-slate-700'
@@ -1598,6 +2196,22 @@ export default function App(): React.JSX.Element {
                                   </button>
                                 );
                               })}
+                              <button
+                                onClick={() => handleConvertToPrepaid('inbox')}
+                                disabled={isCancelled || isPrepaid}
+                                className={`w-full p-2.5 rounded-xl border text-left text-xs font-bold transition-all cursor-pointer flex items-center justify-between disabled:cursor-default ${
+                                  isPrepaid
+                                    ? 'bg-violet-50 border-violet-500 text-violet-900'
+                                    : 'bg-rose-50 hover:bg-rose-100 border-[#FE2C55]/50 text-[#FE2C55] disabled:opacity-40'
+                                }`}
+                              >
+                                <span>
+                                  {isPrepaid
+                                    ? '✓ Paid via GCash. Nothing to collect at door'
+                                    : `💳 Pay now via GCash and save ₱${POST_CHECKOUT_PREPAID_INCENTIVE}`}
+                                </span>
+                                {isPrepaid && <CheckCircle2 className="w-4 h-4 text-violet-600" />}
+                              </button>
                             </div>
                           </div>
                         </div>
@@ -1619,17 +2233,19 @@ export default function App(): React.JSX.Element {
                           <div className="flex items-center gap-2">
                             <span className="font-bold text-xs">←</span>
                             <div className="w-7 h-7 rounded-full bg-white text-[#075E54] font-black text-xs flex items-center justify-center">
-                              FE
+                              {activeOrder.courier.split(/[\s&]+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase()}
                             </div>
                             <div>
                               <div className="text-xs font-bold leading-tight flex items-center gap-1">
-                                <span>Fast Express AI Rider</span>
+                                <span>{activeOrder.courier} AI Rider</span>
                                 <CheckCircle2 className="w-3 h-3 text-[#25F4EE]" />
                               </div>
                               <div className="text-[9px] text-teal-100">Automated Dispatch Assistant</div>
                             </div>
                           </div>
-                          <span className="text-[10px] font-mono bg-white/20 px-1.5 py-0.2 rounded">PHP COD</span>
+                          <span className="text-[10px] font-mono bg-white/20 px-1.5 py-0.2 rounded">
+                            {isPrepaid ? 'PREPAID' : `COD ₱${collectAtDoor(activeOrder).toLocaleString()}`}
+                          </span>
                         </div>
 
                         {/* Chat Messages Log */}
@@ -1661,26 +2277,38 @@ export default function App(): React.JSX.Element {
                           <div className="flex flex-col gap-1.5">
                             <button
                               onClick={() => handleCourierReply('yes')}
-                              className="py-1.5 px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
+                              disabled={isCancelled}
+                              className="disabled:opacity-40 disabled:cursor-not-allowed py-1.5 px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
                             >
                               <Check className="w-3 h-3" />
-                              <span>👍 Yes, Home with Cash</span>
+                              <span>{isPrepaid ? '👍 Yes, I am home' : '👍 Yes, Home with Cash'}</span>
                             </button>
 
                             <button
                               onClick={() => handleCourierReply('reschedule')}
-                              className="py-1.5 px-2.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-slate-950 text-[11px] font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
+                              disabled={isCancelled}
+                              className="disabled:opacity-40 disabled:cursor-not-allowed py-1.5 px-2.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-slate-950 text-[11px] font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
                             >
                               <Clock className="w-3 h-3" />
                               <span>📅 Reschedule to Tomorrow</span>
                             </button>
 
                             <button
+                              onClick={() => handleConvertToPrepaid('chat')}
+                              disabled={isCancelled || isPrepaid}
+                              className="disabled:opacity-40 disabled:cursor-not-allowed py-1.5 px-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
+                            >
+                              <Wallet className="w-3 h-3" />
+                              <span>{isPrepaid ? '✓ Paid via GCash' : '💳 Pay now via GCash'}</span>
+                            </button>
+
+                            <button
                               onClick={() => handleCourierReply('cancel')}
-                              className="py-1.5 px-2.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
+                              disabled={isCancelled}
+                              className="disabled:opacity-40 disabled:cursor-not-allowed py-1.5 px-2.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
                             >
                               <X className="w-3 h-3" />
-                              <span>🚫 Cancel COD Order</span>
+                              <span>{isPrepaid ? '🚫 Cancel Order' : '🚫 Cancel COD Order'}</span>
                             </button>
                           </div>
                         </div>
